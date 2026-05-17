@@ -1,0 +1,139 @@
+
+kb schema-check — Phase 1 diagnostic
+Vault: /Users/bugster/Projects/athena
+
+============================================================
+  RAW frontmatter: 360 files
+============================================================
+
+  [233+ files] raw: missing frontmatter
+    - raw/papers/artifacts/www-blackhat-com-docs-us-17-wednesday-us-17-robbins-an-ace-u.md
+    - raw/papers/artifacts/arxiv-org-abs-2403-02467.md
+    - raw/papers/artifacts/ucdavis-probability-lecture-notes.md
+    ... and 230 more
+
+  [  5+ files] raw: captured_at: Field required
+    - raw/papers/artifacts/deep-learning.md
+    - raw/papers/artifacts/arxiv-org-abs-2602-09433.md
+    - raw/webpages/artifacts/farion1231cc-switch-a-cross-platform-desktop-all-in-one-assi.md
+    ... and 2 more
+
+  [  3+ files] raw: title: Field required
+    - raw/papers/artifacts/deep-learning.md
+    - raw/papers/artifacts/arxiv-org-abs-2602-09433.md
+    - raw/webpages/artifacts/uber-ai-transformation-7-lessons-for-chinese-enterprises.md
+
+  [  3+ files] raw: source: Field required
+    - raw/papers/artifacts/deep-learning.md
+    - raw/papers/artifacts/arxiv-org-abs-2602-09433.md
+    - raw/webpages/artifacts/uber-ai-transformation-7-lessons-for-chinese-enterprises.md
+
+  [  1+ files] raw: source: Value error, source must be a URL (http/https/file), got: '"../../assets/everything-claude-has-shipped-in-2026-and-how-to-actually-us/69eb3beff3c401a0a6d988d040a186261e735166eead2863638751b0613ee456.jpg)'
+    - raw/webpages/artifacts/everything-claude-has-shipped-in-2026-and-how-to-actually-us.md
+
+  [  1+ files] raw: source: Value error, source must be a URL (http/https/file), got: '"../../assets/ai-agent-stack-everyone-must-use-in-2026-builder-s-guide-/bbd47de77d3bf4e91bbede84b52591fa596588d811bdba908a8269a2ffe12b06.jpg)'
+    - raw/webpages/artifacts/ai-agent-stack-everyone-must-use-in-2026-builder-s-guide-.md
+
+============================================================
+  WIKI frontmatter: 357 files
+  Shape distribution: merged: 14, standard: 341, synthesis: 2
+============================================================
+
+  [  5+ files] wiki[merged]: tags: Input should be a valid list
+    - wiki/format/repos/Stanford CS229 — ML Cheatsheets & Notes.md
+    - wiki/format/repos/Microsoft Beginner Courses.md
+    - wiki/format/repos/Cognee — Self-Improving Knowledge Engine for AI Memory.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: tags: Input should be a valid list
+    - wiki/format/repos/GitHub: Books — Freely Shareable AI and Machine Learning PDFs.md
+    - wiki/format/repos/GitHub: dive-into-machine-learning — Hands-On ML Learning Path.md
+    - wiki/format/repos/GitHub: rowboat — AI Coworker with Memory.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: url: Field required
+    - wiki/format/papers/Organizational Memory Walsh.md
+    - wiki/format/papers/PDF Us 17 Robbins An Ace Up The Sleeve Designing Active Director.md
+    - wiki/format/papers/DeepSeek V4.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: date_added: Field required
+    - wiki/format/papers/PDF Us 17 Robbins An Ace Up The Sleeve Designing Active Director.md
+    - wiki/format/webpages/Trivy Supply Chain Compromise — What Kubernetes Teams Need to Know.md
+    - wiki/format/webpages/Trivy Supply Chain Attack — TeamPCP Compromise.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: last_updated: Field required
+    - wiki/format/papers/PDF Us 17 Robbins An Ace Up The Sleeve Designing Active Director.md
+    - wiki/format/webpages/Trivy Supply Chain Compromise — What Kubernetes Teams Need to Know.md
+    - wiki/format/webpages/Trivy Supply Chain Attack — TeamPCP Compromise.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: source_type: Field required
+    - wiki/format/papers/PDF Us 17 Robbins An Ace Up The Sleeve Designing Active Director.md
+    - wiki/format/webpages/Trivy Supply Chain Compromise — What Kubernetes Teams Need to Know.md
+    - wiki/format/webpages/Trivy Supply Chain Attack — TeamPCP Compromise.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: raw_path: Field required
+    - wiki/format/papers/PDF Us 17 Robbins An Ace Up The Sleeve Designing Active Director.md
+    - wiki/format/webpages/Trivy Supply Chain Compromise — What Kubernetes Teams Need to Know.md
+    - wiki/format/webpages/Trivy Supply Chain Attack — TeamPCP Compromise.md
+    ... and 2 more
+
+  [  5+ files] wiki[standard]: summary: Field required
+    - wiki/format/papers/PDF Us 17 Robbins An Ace Up The Sleeve Designing Active Director.md
+    - wiki/format/webpages/Trivy Supply Chain Compromise — What Kubernetes Teams Need to Know.md
+    - wiki/format/webpages/Trivy Supply Chain Attack — TeamPCP Compromise.md
+    ... and 2 more
+
+  [  5+ files] wiki[merged]: urls: Field required
+    - wiki/format/videos/YouTube: Stanford CS336 — Language Modeling from Scratch.md
+    - wiki/format/videos/YouTube: Stanford CS229 — Machine Learning (Spring 2022).md
+    - wiki/format/videos/YouTube: Stanford CME295 — Transformers & Large Language Models.md
+    ... and 2 more
+
+  [  4+ files] wiki[merged]: raw_paths: List should have at least 2 items after validation, not 1
+    - wiki/format/videos/YouTube: Stanford CS336 — Language Modeling from Scratch.md
+    - wiki/format/videos/YouTube: Stanford CS229 — Machine Learning (Spring 2022).md
+    - wiki/format/videos/YouTube: Stanford CME295 — Transformers & Large Language Models.md
+    ... and 1 more
+
+  [  2+ files] wiki[synthesis]: tags: Input should be a valid list
+    - wiki/format/entities/Tobi Lutke.md
+    - wiki/format/entities/Andrej Karpathy.md
+
+  [  1+ files] wiki[merged]: raw_paths: Value error, raw_paths entries must match raw/<cat>/artifacts/<slug>.md, got: 'raw/papers/deep-learning.md'
+    - wiki/format/papers/Drive: Deep Learning.md
+
+  [  1+ files] wiki[merged]: raw_paths: Value error, raw_paths entries must match raw/<cat>/artifacts/<slug>.md, got: 'raw/webpages/post-by-zabihullahatal-on-x.md'
+    - wiki/format/webpages/MIT — 12 AI Textbooks Written by Top Researchers.md
+
+  [  1+ files] wiki[merged]: raw_paths: Value error, raw_paths entries must match raw/<cat>/artifacts/<slug>.md, got: 'raw/webpages/how-to-build-ai-agents-that-don-t-forget-full-guide.md'
+    - wiki/format/webpages/How to Build AI Agents That Don’t Forget (Full Guide).md
+
+============================================================
+  URL canonicalization: 336 wiki pages with `url:` field
+============================================================
+
+  [ 10+ pages] non-canonical URL form
+    - wiki/format/repos/GitHub: Books — Freely Shareable AI and Machine Learning PDFs.md
+      have: https://github.com/AniruddhaChattopadhyay/Books/
+      want: https://github.com/AniruddhaChattopadhyay/Books
+    - wiki/format/repos/GitHub: HackGpt — AI-Powered Penetration Testing Platform.md
+      have: https://github.com/yashab-cyber/HackGpt/
+      want: https://github.com/yashab-cyber/HackGpt
+    - wiki/format/repos/GitHub: awesome-claude-skills — Awesome Agent Skills (Community Collection).md
+      have: https://github.com/VoltAgent/awesome-claude-skills/
+      want: https://github.com/VoltAgent/awesome-claude-skills
+    - wiki/format/repos/GitHub: awesome-startup — Curated Resources for Founders.md
+      have: https://github.com/KrishMunot/awesome-startup/
+      want: https://github.com/KrishMunot/awesome-startup
+    - wiki/format/repos/GitHub: AI-Project-Gallery — KalyanM45.md
+      have: https://github.com/KalyanM45/AI-Project-Gallery/
+      want: https://github.com/KalyanM45/AI-Project-Gallery
+    ... and 5 more
+
+════════════════════════════════════════════════════════════
+  360 raw + 357 wiki files checked · 6 raw + 14 wiki error classes · 10 URL canonicalization fixes pending
+════════════════════════════════════════════════════════════

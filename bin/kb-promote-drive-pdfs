@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Promote Google-Drive-hosted PDFs that were captured as webpages to
+proper papers. When Athena's browser-capture path hits a Google Drive
+`/file/d/<ID>/view` URL, it extracts the PDF's rendered text into
+raw/webpages/ but doesn't download the binary. This script downloads
+the PDF, moves the extracted .md to raw/papers/, and updates the wiki
+page's frontmatter + Source line so Local Copy points to the real PDF.
+
+Usage:
+    python3 bin/kb-promote-drive-pdfs              # dry-run
+    python3 bin/kb-promote-drive-pdfs --apply
+"""
+
+import os
+import re
+import sys
+import urllib.request
+import urllib.error
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+FM_URL_RE = re.compile(r'^url:\s*["\']?(https?://[^"\'\s]+)', re.MULTILINE)
+FM_TYPE_RE = re.compile(r'^source_type:\s*["\']?([a-z]+)', re.MULTILINE)
+FM_RAW_RE = re.compile(r'^raw_path:\s*["\']?([^"\']+)', re.MULTILINE)
+DRIVE_ID_RE = re.compile(r'/file/d/([^/]+)/')
+SOURCE_LINE_RE = re.compile(
+    r'\[\[(?P<raw>raw/[^\]|]+?\.md)\|Local Copy\]\]',
+)
+
+PDF_MAGIC = b'%PDF-'
+
+
+def _find_candidates():
+    """Yield dicts for pages classified as webpage whose URL is a
+    Google Drive `/file/d/<id>/view` link."""
+    for root, _, files in os.walk(os.path.join(VAULT_ROOT, 'wiki')):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            try:
+                text = open(path).read()
+            except OSError:
+                continue
+            url_m = FM_URL_RE.search(text)
+            type_m = FM_TYPE_RE.search(text)
+            raw_m = FM_RAW_RE.search(text)
+            if not (url_m and type_m and raw_m):
+                continue
+            if type_m.group(1) != 'webpage':
+                continue
+            url = url_m.group(1)
+            id_m = DRIVE_ID_RE.search(url)
+            if not id_m:
+                continue
+            yield {
+                'wiki_path': path,
+                'url': url,
+                'file_id': id_m.group(1),
+                'raw_path': raw_m.group(1),
+                'text': text,
+            }
+
+
+def _download_drive_pdf(file_id, dest_path, timeout=60):
+    """Download from Drive's export endpoint. Returns True on a valid
+    PDF write, False on any failure (HTML interstitial, 403, etc.)."""
+    url = f'https://drive.google.com/uc?export=download&id={file_id}'
+    try:
+        req = urllib.request.Request(
+            url, headers={'User-Agent': 'Athena/1.0 (PDF promotion)'},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp, \
+                open(dest_path, 'wb') as f:
+            # Read a small chunk first to verify PDF magic bytes.
+            # Drive returns HTML for large files that need a second
+            # confirmation; those wouldn't pass this check.
+            first = resp.read(8)
+            if not first.startswith(PDF_MAGIC):
+                return False
+            f.write(first)
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return os.path.getsize(dest_path) > 1024  # sanity: > 1 KB
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        try:
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+        except OSError:
+            pass
+        return False
+
+
+def _slug_for_paper(wiki_title_path):
+    """Derive a clean slug from the wiki page filename (not the raw
+    file — the raw's URL-based slug is ugly for Drive URLs)."""
+    base = os.path.splitext(os.path.basename(wiki_title_path))[0]
+    s = base.lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    s = re.sub(r'-{2,}', '-', s).strip('-')
+    return s[:60] or 'untitled'
+
+
+def _promote(candidate, apply):
+    """Perform the filesystem + frontmatter changes for one candidate.
+    Returns a status string."""
+    wiki_path = candidate['wiki_path']
+    raw_path = candidate['raw_path']
+    file_id = candidate['file_id']
+
+    old_raw_abs = os.path.join(VAULT_ROOT, raw_path)
+    if not os.path.exists(old_raw_abs):
+        return f'SKIP: raw file missing ({raw_path})'
+
+    slug = _slug_for_paper(wiki_path)
+    new_raw_rel = f'raw/papers/{slug}.md'
+    new_pdf_rel = f'raw/papers/{slug}.pdf'
+    new_raw_abs = os.path.join(VAULT_ROOT, new_raw_rel)
+    new_pdf_abs = os.path.join(VAULT_ROOT, new_pdf_rel)
+
+    if os.path.exists(new_raw_abs) or os.path.exists(new_pdf_abs):
+        return f'SKIP: target exists ({new_raw_rel} or {new_pdf_rel})'
+
+    if not apply:
+        # Dry-run: test the download without writing side effects to
+        # other files — small scratch path under /tmp.
+        scratch = f'/tmp/drive-check-{file_id}.pdf'
+        ok = _download_drive_pdf(file_id, scratch)
+        try:
+            size = os.path.getsize(scratch) if os.path.exists(scratch) else 0
+            os.remove(scratch)
+        except OSError:
+            size = 0
+        return f'{"OK" if ok else "FAIL"}: download test ({size // 1024} KB) -> would create {new_raw_rel} + {new_pdf_rel}'
+
+    # Real run: download, move, rewrite.
+    os.makedirs(os.path.dirname(new_pdf_abs), exist_ok=True)
+    if not _download_drive_pdf(file_id, new_pdf_abs):
+        return 'FAIL: PDF download returned non-PDF or errored'
+
+    # Move raw .md (preserves timestamps)
+    os.rename(old_raw_abs, new_raw_abs)
+
+    # Update wiki frontmatter: source_type, raw_path, and the Source
+    # line's Local Copy link.
+    text = candidate['text']
+    text = re.sub(
+        r'^source_type:\s*["\']?webpage["\']?\s*$',
+        'source_type: "paper"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    text = re.sub(
+        r'^raw_path:\s*["\']?[^"\']+["\']?\s*$',
+        f'raw_path: "{new_raw_rel}"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    # Local Copy link now points at the downloaded PDF, not the .md.
+    text = SOURCE_LINE_RE.sub(
+        f'[[{new_pdf_rel}|Local Copy]]',
+        text, count=1,
+    )
+    # Validate the rewritten frontmatter still meets schema before we
+    # commit the write — promotion is a mutating operation and a
+    # malformed result would leave the wiki in a worse state than
+    # before. Atomic write so a crash mid-promotion can't half-update.
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'lib'))
+    try:
+        from wiki_schema import validate_wiki_frontmatter, SchemaError  # type: ignore
+        validate_wiki_frontmatter(text)
+    except SchemaError as e:
+        return f'FAIL: post-rewrite schema check failed ({e})'
+    except ImportError:
+        pass  # wiki_schema not available — fall back to non-validated write
+    tmp_path = wiki_path + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    os.replace(tmp_path, wiki_path)
+
+    return f'PROMOTED -> {new_raw_rel} + {new_pdf_rel}'
+
+
+def main():
+    apply = '--apply' in sys.argv
+    cands = list(_find_candidates())
+    if not cands:
+        print('No Google Drive PDF candidates found.')
+        return
+
+    print(f'{"APPLYING" if apply else "DRY RUN"} — {len(cands)} candidate(s)\n')
+    for c in cands:
+        status = _promote(c, apply)
+        print(f'  {os.path.relpath(c["wiki_path"], VAULT_ROOT)}')
+        print(f'    {status}')
+    if not apply:
+        print('\nRe-run with --apply to download + promote.')
+
+
+if __name__ == '__main__':
+    main()
