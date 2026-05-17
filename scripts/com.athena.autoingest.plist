@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.athena.autoingest — filesystem-watch ingest trigger.
+
+  Fires `kb add` within ~1-2 seconds of any change in the raw artifact
+  directories or the inbox. This complements the hourly com.athena.sync
+  job: sync handles git/build/backstop ingest; autoingest handles the
+  capture → wiki synth latency you actually feel as a user.
+
+  When this fires:
+    - Web Clipper drops a new raw .md file in raw/webpages/artifacts/
+    - kb-capture writes a new arxiv .md or .pdf in raw/papers/artifacts/
+    - User adds URLs to inbox/url-new.txt
+    - User drops a clipping markdown in inbox/clippings/ OR clippings/
+      (the Web Clipper config defaults to vault-root clippings/; both
+      are watched so wherever the user points it, autoingest fires)
+
+  The watched directories cover all the entry points the orphan walker
+  cares about. New raws → kb add scans → wiki pages synthesized →
+  appears on Recently Added dashboard within seconds.
+
+  Install (one-time):
+    cp scripts/com.athena.autoingest.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.athena.autoingest.plist
+
+  Or run scripts/install-sync-launchd.sh which installs both jobs.
+
+  Inspect:
+    launchctl list | grep com.athena.autoingest
+    tail -f /tmp/athena-autoingest.log
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.athena.autoingest.plist
+    rm ~/Library/LaunchAgents/com.athena.autoingest.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.athena.autoingest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-c</string>
+        <string>cd /Users/bugster/Projects/athena &amp;&amp; /opt/homebrew/bin/npm run kb:auto-ingest</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!--
+          Order matters. ~/.local/bin first so the user-installed Claude Code
+          (modern version, 2.x) wins over /usr/local/bin/claude (often a
+          stale 1.x install left from older `npm install -g claude` runs).
+          The bulk-llm-regen-summaries.py script uses 2.x-only flags like
+          --disable-slash-commands; pinning to the right binary avoids
+          'unknown option' failures inside the launchd-spawned environment.
+        -->
+        <key>PATH</key>
+        <string>/Users/bugster/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/bugster</string>
+    </dict>
+
+    <!--
+      Watch the raw artifact directories and the inbox. launchd fires the
+      program when any contained file is added/modified/deleted. Watching
+      a directory triggers on its content changes, which is what we want
+      for capture detection.
+    -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/bugster/Projects/athena/raw/papers/artifacts</string>
+        <string>/Users/bugster/Projects/athena/raw/repos/artifacts</string>
+        <string>/Users/bugster/Projects/athena/raw/webpages/artifacts</string>
+        <string>/Users/bugster/Projects/athena/raw/videos/artifacts</string>
+        <string>/Users/bugster/Projects/athena/inbox/url-new.txt</string>
+        <string>/Users/bugster/Projects/athena/inbox/clippings</string>
+        <string>/Users/bugster/Projects/athena/clippings</string>
+    </array>
+
+    <!--
+      Coalesce burst captures: if you clip 3 pages in 10 seconds, launchd
+      fires kb add ONCE per 30s window, not 3 times. kb add walks all
+      orphans on each invocation, so a single fire catches the whole burst.
+      Raise this if you find the system feels chatty; lower if you want
+      faster reaction.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!--
+      RunAtLoad: false — don't synth on launchctl load. Avoids a startup
+      surprise if there are many orphans. The hourly sync job handles
+      that case explicitly.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/athena-autoingest.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/athena-autoingest.log</string>
+</dict>
+</plist>
