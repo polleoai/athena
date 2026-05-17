@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Add `aliases:` frontmatter entries for pages where the filename is
+a 75-char truncation of the full title.
+
+When a page's title exceeds 75 chars, Athena truncates the filename.
+Wikilinks in other pages' `related:` lists typically reference the
+full title and therefore break (Obsidian resolves wikilinks by filename,
+not by `title:` frontmatter unless an alias is present).
+
+This script adds the full title as an alias in the affected page's
+frontmatter so links using either form resolve correctly. Idempotent
+— if the alias is already present, the page is skipped.
+
+Usage:
+    python3 bin/kb-add-title-aliases              # dry-run
+    python3 bin/kb-add-title-aliases --apply
+"""
+
+import os
+import re
+import sys
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+FRONTMATTER_RE = re.compile(r'^---\n(?P<body>[\s\S]*?)\n---\n', re.MULTILINE)
+FM_TITLE_RE = re.compile(r'^title:\s*["\'](?P<title>.+?)["\']\s*$', re.MULTILINE)
+FM_ALIASES_RE = re.compile(r'^aliases:\s*\n((?:\s+-\s+.*\n)*)', re.MULTILINE)
+FM_ALIASES_INLINE_RE = re.compile(r'^aliases:\s*\[([^\]]*)\]\s*$', re.MULTILINE)
+
+
+def _has_alias(body, alias):
+    """Check if `alias` is already listed under `aliases:` in the
+    frontmatter body. Supports both block list and inline array forms."""
+    m = FM_ALIASES_RE.search(body)
+    if m:
+        return alias in m.group(1) or f'"{alias}"' in m.group(1) or f"'{alias}'" in m.group(1)
+    m = FM_ALIASES_INLINE_RE.search(body)
+    if m:
+        return alias in m.group(1)
+    return False
+
+
+def _inject_alias(fm_body, alias):
+    """Add `alias` to the aliases field; append the field if missing.
+    Preserves the rest of the frontmatter verbatim."""
+    escaped = alias.replace('"', '\\"')
+    entry = f'  - "{escaped}"\n'
+
+    m = FM_ALIASES_RE.search(fm_body)
+    if m:
+        # Insert after existing list items
+        return fm_body[:m.end()] + entry + fm_body[m.end():]
+
+    m = FM_ALIASES_INLINE_RE.search(fm_body)
+    if m:
+        existing = m.group(1).strip()
+        new_value = (existing + ', ' if existing else '') + f'"{escaped}"'
+        replacement = f'aliases: [{new_value}]'
+        return fm_body[:m.start()] + replacement + fm_body[m.end():]
+
+    # No aliases field yet — append one right before the closing ---
+    return fm_body.rstrip() + f'\naliases:\n{entry}'
+
+
+def process(path, apply):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    fm_match = FRONTMATTER_RE.match(text)
+    if not fm_match:
+        return None
+    fm_body = fm_match.group('body')
+    t_match = FM_TITLE_RE.search(fm_body)
+    if not t_match:
+        return None
+    title = t_match.group('title')
+    filename_base = os.path.splitext(os.path.basename(path))[0]
+    if title == filename_base:
+        return None  # No divergence — nothing to do.
+    if _has_alias(fm_body, title):
+        return None  # Alias already present — idempotent skip.
+
+    new_fm = _inject_alias(fm_body, title)
+    new_text = f'---\n{new_fm}\n---\n' + text[fm_match.end():]
+    if apply and new_text != text:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+    return title
+
+
+def main():
+    apply = '--apply' in sys.argv
+    updated = []
+    for root, _, files in os.walk(os.path.join(VAULT_ROOT, 'wiki')):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            if fn == '_TEMPLATE.md':
+                continue
+            path = os.path.join(root, fn)
+            title = process(path, apply)
+            if title:
+                updated.append((path, title))
+
+    print(f'{"APPLYING" if apply else "DRY RUN"} — {len(updated)} page(s) need alias injection')
+    for p, t in updated[:10]:
+        print(f'  {os.path.relpath(p, VAULT_ROOT)}')
+        print(f'    alias: {t}')
+    if len(updated) > 10:
+        print(f'  ... and {len(updated) - 10} more')
+    if not apply and updated:
+        print('\nRe-run with --apply to execute.')
+
+
+if __name__ == '__main__':
+    main()
