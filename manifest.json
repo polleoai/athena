@@ -1,0 +1,10 @@
+{
+  "id": "athena",
+  "name": "Athena",
+  "version": "1.0.2",
+  "minAppVersion": "1.0.0",
+  "description": "Your Second Brain — chat with the LLM of your choice (Claude, GPT, Gemini, or local CLI), ingest URLs, manage knowledge, run projects. Powered by Gryphon.",
+  "author": "POLLEO.AI",
+  "authorUrl": "https://www.polleo.ai",
+  "isDesktopOnly": true
+}
