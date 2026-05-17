@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""Phase 2 migration: move raw files into artifacts/ subdirs, inline paper
+extracts into wiki bodies, rewrite every raw_path and Local Copy link, create
+_Contents.md scaffolds, update the config + hash.
+
+Usage:
+    bin/kb-migrate-to-artifacts              # dry-run: plan only
+    bin/kb-migrate-to-artifacts --apply      # actually write changes
+
+Idempotent: re-running after apply detects no work left.
+
+What it does, in order:
+
+    1. Create artifacts/ subdir under each raw/<cat>/
+    2. git-mv every content file from raw/<cat>/ → raw/<cat>/artifacts/
+       (skips _TEMPLATE.md, .gitkeep, _Contents.md)
+    3. For papers: read the .md extract, if the content is real text (not PDF
+       bytes, not HTML interstitial, not a "Loading Page" stub), inline into
+       the owning wiki page's body under ## Content. Then delete the .md
+       extract — keep only the PDF in artifacts/.
+    4. Rewrite raw_path: and raw_paths: frontmatter across every wiki page
+    5. Rewrite [[raw/<cat>/X.md|Local Copy]] links in every wiki body
+    6. Create _Contents.md with scaffold text + auto-block markers in each
+       raw/<cat>/ and wiki/<subtree>/ (auto-block filled by kb lint later)
+    7. Update bin/config/athena.default.json: artifacts_subdir = "artifacts"
+    8. Recompute SHA256 of the new default, patch _EXPECTED_DEFAULT_SHA256
+       in bin/lib/config.py
+    9. Report what was done.
+
+Recovery: every file move goes through git-mv (git tracks rename), every
+rewrite preserves the original in git history. `git reset --hard HEAD` before
+commit undoes the whole operation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# Resolve KB root = repo root (this script lives at bin/kb-migrate-to-artifacts)
+KB = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(KB / "bin" / "lib"))
+from config import load as load_config, raw_categories  # noqa: E402
+
+
+# ── Paper extract quality detection ──────────────────────────────────────
+
+_BAD_CONTENT_MARKERS = [
+    "%PDF-",
+    "<!DOCTYPE",
+    "<html",
+    "Loading Page",
+    "Sign in to view",
+    "You need permission",
+    "accounts.google.com/signin",
+]
+
+
+def _paper_extract_is_real(body: str) -> bool:
+    """Heuristic: decide whether a raw paper .md has real extracted text that
+    should be inlined, vs garbage (PDF bytes, auth interstitial) that should
+    be dropped silently."""
+    stripped = body.strip()
+    if len(stripped) < 300:
+        return False
+    head = stripped[:2000]
+    for marker in _BAD_CONTENT_MARKERS:
+        if marker in head:
+            return False
+    return True
+
+
+# ── Filesystem helpers ───────────────────────────────────────────────────
+
+def git_mv(src: Path, dst: Path, dry: bool) -> None:
+    """git-mv wrapper. Falls back to shutil.move if src isn't tracked."""
+    if dry:
+        print(f"  mv  {src.relative_to(KB)}")
+        print(f"      → {dst.relative_to(KB)}")
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "mv", str(src), str(dst)],
+            cwd=KB, check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        # Not tracked (or git mv doesn't like it) — plain move.
+        shutil.move(str(src), str(dst))
+
+
+def read_text(p: Path) -> str:
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def write_text(p: Path, content: str, dry: bool) -> None:
+    if dry:
+        return
+    p.write_text(content, encoding="utf-8")
+
+
+# ── Frontmatter parse (lightweight, doesn't need PyYAML) ─────────────────
+
+_FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def split_frontmatter(content: str) -> tuple[str, str]:
+    """Return (frontmatter_block, body). Frontmatter includes the --- lines."""
+    m = _FM_RE.match(content)
+    if not m:
+        return "", content
+    return content[: m.end()], content[m.end():]
+
+
+def parse_raw_paths(fm_text: str) -> list[str]:
+    """Extract raw_path: (single) and raw_paths: (list) from a frontmatter
+    block. Returns a deduplicated list of paths."""
+    paths = []
+    single = re.search(r'^raw_path:\s*"?([^"\n]+)"?\s*$', fm_text, re.MULTILINE)
+    if single:
+        paths.append(single.group(1).strip().strip('"'))
+    list_match = re.search(
+        r"^raw_paths:\s*\n((?:\s+-\s+[^\n]+\n)+)",
+        fm_text, re.MULTILINE,
+    )
+    if list_match:
+        for line in list_match.group(1).splitlines():
+            m = re.match(r'\s+-\s+"?([^"\n]+)"?\s*$', line)
+            if m:
+                paths.append(m.group(1).strip().strip('"'))
+    return list(dict.fromkeys(paths))  # dedupe preserving order
+
+
+# ── Plan building ────────────────────────────────────────────────────────
+
+def build_plan() -> dict:
+    cfg = load_config()
+    cats = raw_categories()
+
+    # 1. File moves: for each raw/<cat>/, enumerate non-system files
+    file_moves = []  # [(src, dst, is_paper_md)]
+    system_files = {"_TEMPLATE.md", ".gitkeep", "_Contents.md"}
+    for cat_name, cat_cfg in cats.items():
+        cat_dir = KB / cat_cfg["dir"]
+        if not cat_dir.is_dir():
+            continue
+        artifacts_dir = cat_dir / "artifacts"
+        for entry in cat_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if entry.name in system_files:
+                continue
+            if entry.parent.name == "artifacts":
+                continue  # already migrated
+            is_paper_md = (cat_name == "papers" and entry.suffix.lower() == ".md")
+            file_moves.append((entry, artifacts_dir / entry.name, is_paper_md))
+
+    # 2. Paper inlines: among the paper .md moves, which extract real content?
+    paper_inlines = []  # [(paper_md_path_post_move, owning_wiki_page, extract_body)]
+    wiki_pages = list(KB.glob("wiki/**/*.md"))
+    # Build raw_path → wiki page lookup
+    raw_to_wiki = {}
+    for wp in wiki_pages:
+        if wp.name in ("_Contents.md", "_TEMPLATE.md"):
+            continue
+        try:
+            c = read_text(wp)
+        except OSError:
+            continue
+        fm_text, _ = split_frontmatter(c)
+        for rp in parse_raw_paths(fm_text):
+            raw_to_wiki[rp] = wp
+
+    for src, dst, is_paper_md in file_moves:
+        if not is_paper_md:
+            continue
+        old_rel = str(src.relative_to(KB))
+        wiki_page = raw_to_wiki.get(old_rel)
+        if wiki_page is None:
+            continue  # orphan; leave its .md at new artifacts path
+        try:
+            extract_content = read_text(src)
+        except OSError:
+            continue
+        _, body = split_frontmatter(extract_content)
+        # Strip the raw-file template chrome (first H1 + metadata bullets + ##
+        # User Suggestions + ## Content header).
+        body = re.sub(r"^#[^\n]*\n", "", body, count=1)
+        body = re.sub(
+            r"^(?:-\s+\*\*[^\n]+\n)+", "", body, count=1, flags=re.MULTILINE,
+        )
+        body = re.sub(
+            r"^##\s+User Suggestions.*?(?=^##\s|\Z)", "",
+            body, count=1, flags=re.DOTALL | re.MULTILINE,
+        )
+        body = re.sub(r"^##\s+Content\s*\n", "", body, count=1, flags=re.MULTILINE)
+        body = body.strip()
+        if _paper_extract_is_real(body):
+            paper_inlines.append((dst, wiki_page, body))
+
+    # 3. Wikilink rewrites: scan every wiki page
+    # Each wiki page: frontmatter raw_path / raw_paths, body [[raw/...|Local Copy]]
+    wikilink_rewrites = []
+    for wp in wiki_pages:
+        if wp.name in ("_Contents.md", "_TEMPLATE.md"):
+            continue
+        try:
+            c = read_text(wp)
+        except OSError:
+            continue
+        new_c = _rewrite_paths_in_content(c, cats)
+        if new_c != c:
+            wikilink_rewrites.append(wp)
+
+    # 4. _Contents.md files to create
+    contents_files = []
+    for cat_name, cat_cfg in cats.items():
+        cat_dir = KB / cat_cfg["dir"]
+        if cat_dir.is_dir() and any(cat_dir.iterdir()):
+            contents_files.append(cat_dir / "_Contents.md")
+    wiki_subdirs = [
+        "wiki/format/papers", "wiki/format/repos", "wiki/format/webpages",
+        "wiki/format/videos", "wiki/format/images", "wiki/format/entities",
+        "wiki/insights", "wiki/topics", "wiki/journal",
+    ]
+    for sd in wiki_subdirs:
+        d = KB / sd
+        if d.is_dir():
+            contents_files.append(d / "_Contents.md")
+    contents_files = [f for f in contents_files if not f.exists()]
+
+    # 5. Config update
+    config_path = KB / "bin/config/athena.default.json"
+    config_will_change = False
+    with open(config_path) as f:
+        current_cfg = json.load(f)
+    if current_cfg.get("raw", {}).get("artifacts_subdir", "") != "artifacts":
+        config_will_change = True
+
+    return {
+        "file_moves": file_moves,
+        "paper_inlines": paper_inlines,
+        "wikilink_rewrites": wikilink_rewrites,
+        "contents_files": contents_files,
+        "config_will_change": config_will_change,
+        "config_path": config_path,
+    }
+
+
+# ── Wikilink / raw_path rewriter ─────────────────────────────────────────
+
+def _rewrite_paths_in_content(content: str, cats: dict) -> str:
+    """In a wiki page's full text, rewrite every `raw/<cat>/<file>` reference
+    to `raw/<cat>/artifacts/<file>`. Handles frontmatter raw_path/raw_paths
+    and body wikilinks. Idempotent: already-migrated paths pass through.
+    """
+    for cat_name, cat_cfg in cats.items():
+        base = cat_cfg["dir"]  # e.g. "raw/papers"
+        # Match base/<basename> but NOT base/artifacts/<basename>.
+        # Basename must be a simple filename (no slashes, ends in a real ext).
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_/]){re.escape(base)}/(?!artifacts/)([^/\s\"\]|]+\.[A-Za-z0-9]+)"
+        )
+        content = pattern.sub(rf"{base}/artifacts/\1", content)
+    return content
+
+
+# ── _Contents.md scaffold ────────────────────────────────────────────────
+
+_CONTENTS_SCAFFOLD = """\
+# {title} — Table of Contents
+
+*Auto-maintained list of every page in this directory. Hand-curated notes
+(chapters, highlights, ordering) can live ABOVE the auto-block below and
+will not be overwritten by `kb lint`.*
+
+<!-- auto-contents:start (generated by kb lint — do not edit inside) -->
+_Empty — run `kb lint` to populate._
+<!-- auto-contents:end -->
+"""
+
+
+def _contents_title(dir_path: Path) -> str:
+    rel = dir_path.relative_to(KB)
+    parts = rel.parts
+    label = parts[-1].replace("-", " ").replace("_", " ").title()
+    if parts[0] == "raw":
+        return f"Raw {label}"
+    if parts[0] == "wiki":
+        return f"Wiki {label}"
+    return label
+
+
+# ── Execution ────────────────────────────────────────────────────────────
+
+def execute(plan: dict, dry: bool) -> None:
+    cats = raw_categories()
+
+    # A. Move files into artifacts/
+    print(f"\n[1/6] Moving {len(plan['file_moves'])} files into artifacts/ ...")
+    for src, dst, _ in plan["file_moves"]:
+        if not src.exists():
+            continue  # already moved on a retry
+        git_mv(src, dst, dry)
+
+    # B. Paper extract inlining
+    print(f"\n[2/6] Inlining {len(plan['paper_inlines'])} paper extracts into wikis...")
+    for extract_path, wiki_page, body in plan["paper_inlines"]:
+        wiki_content = read_text(wiki_page)
+        # Check if wiki already has ## Content to avoid double-inline
+        if re.search(r"^##\s+Content\s*$", wiki_content, re.MULTILINE):
+            continue
+        # Append ## Content section at end, before any trailing empty block
+        insertion = "\n\n## Content\n\n" + body.rstrip() + "\n"
+        # Insert before ## Keywords if it exists; else at end
+        kw_match = re.search(r"\n(## Keywords\s*\n)", wiki_content)
+        if kw_match:
+            new_content = (
+                wiki_content[: kw_match.start()]
+                + insertion
+                + wiki_content[kw_match.start():]
+            )
+        else:
+            new_content = wiki_content.rstrip() + insertion
+        write_text(wiki_page, new_content, dry)
+        # Delete the raw .md extract — PDF stays as the sole raw artifact
+        if dry:
+            print(f"  inline → {wiki_page.relative_to(KB)}; rm {extract_path.relative_to(KB)}")
+        else:
+            try:
+                subprocess.run(
+                    ["git", "rm", "-f", str(extract_path)],
+                    cwd=KB, check=True, capture_output=True,
+                )
+            except subprocess.CalledProcessError:
+                extract_path.unlink(missing_ok=True)
+
+    # C. Rewrite raw_path: / raw_paths: / Local Copy links in every wiki page
+    print(f"\n[3/6] Rewriting wikilinks + raw_paths in {len(plan['wikilink_rewrites'])} wiki pages...")
+    for wp in plan["wikilink_rewrites"]:
+        c = read_text(wp)
+        new_c = _rewrite_paths_in_content(c, cats)
+        if new_c != c:
+            write_text(wp, new_c, dry)
+
+    # D. Create _Contents.md scaffolds (auto-block filled by lint later)
+    print(f"\n[4/6] Creating {len(plan['contents_files'])} _Contents.md scaffolds...")
+    for cpath in plan["contents_files"]:
+        title = _contents_title(cpath.parent)
+        if dry:
+            print(f"  create  {cpath.relative_to(KB)}")
+        else:
+            cpath.parent.mkdir(parents=True, exist_ok=True)
+            cpath.write_text(_CONTENTS_SCAFFOLD.format(title=title), encoding="utf-8")
+
+    # E. Update config to set artifacts_subdir = "artifacts"
+    print(f"\n[5/6] Updating {plan['config_path'].relative_to(KB)}...")
+    if plan["config_will_change"]:
+        with open(plan["config_path"]) as f:
+            cfg_text = f.read()
+        new_text = re.sub(
+            r'("artifacts_subdir":\s*")[^"]*(")',
+            r'\1artifacts\2',
+            cfg_text,
+            count=1,
+        )
+        if new_text == cfg_text:
+            raise RuntimeError("artifacts_subdir field not found in config")
+        if dry:
+            print(f"  update  artifacts_subdir → \"artifacts\"")
+        else:
+            plan["config_path"].write_text(new_text, encoding="utf-8")
+
+    # F. Recompute hash + patch config.py
+    print(f"\n[6/6] Updating SHA256 in bin/lib/config.py...")
+    if not dry:
+        new_hash = hashlib.sha256(
+            plan["config_path"].read_bytes()
+        ).hexdigest()
+        config_py = KB / "bin/lib/config.py"
+        py_text = config_py.read_text(encoding="utf-8")
+        py_new = re.sub(
+            r'(_EXPECTED_DEFAULT_SHA256 = ")[0-9a-f]{64}(")',
+            rf'\g<1>{new_hash}\g<2>',
+            py_text,
+            count=1,
+        )
+        if py_new == py_text:
+            raise RuntimeError("Could not find _EXPECTED_DEFAULT_SHA256 in config.py")
+        config_py.write_text(py_new, encoding="utf-8")
+        print(f"  → SHA256 = {new_hash[:12]}...")
+    else:
+        print("  (would recompute and patch)")
+
+
+# ── Entry point ──────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--apply", action="store_true", help="Actually write changes (default: dry-run)")
+    args = p.parse_args()
+
+    dry = not args.apply
+    print(f"Athena Phase 2 migration — {'DRY RUN' if dry else 'APPLYING'}")
+    print(f"Vault: {KB}")
+    print()
+
+    plan = build_plan()
+    total_ops = (
+        len(plan["file_moves"])
+        + len(plan["paper_inlines"])
+        + len(plan["wikilink_rewrites"])
+        + len(plan["contents_files"])
+        + (1 if plan["config_will_change"] else 0)
+    )
+    print(f"Plan:")
+    print(f"  {len(plan['file_moves'])} file moves (raw → artifacts)")
+    print(f"  {len(plan['paper_inlines'])} paper extracts to inline into wikis")
+    print(f"  {len(plan['wikilink_rewrites'])} wiki pages with path rewrites")
+    print(f"  {len(plan['contents_files'])} _Contents.md files to create")
+    print(f"  {'yes' if plan['config_will_change'] else 'no'} config change (artifacts_subdir)")
+    print(f"  Total operations: {total_ops}")
+
+    if total_ops == 0:
+        print("\nNothing to do — already migrated.")
+        return
+
+    if dry:
+        print("\n(Dry run — no changes written. Re-run with --apply to execute.)")
+    else:
+        print("\nApplying...")
+
+    execute(plan, dry=dry)
+
+    if not dry:
+        print("\nDone. Next: run `kb lint` to populate _Contents.md auto-blocks,")
+        print("then `kb index` to rebuild search. Plugin must be rebuilt too:")
+        print("  npm run build:athena")
+
+
+if __name__ == "__main__":
+    main()
