@@ -1,0 +1,166 @@
+name: Release
+
+# Builds the Athena plugin in CI, signs each release asset with a sigstore
+# build provenance attestation, and attaches the assets to the GitHub
+# Release for a tag. Two triggers:
+#
+#   1. push:        when a release tag is pushed to polleoai/athena, the
+#                   workflow fires automatically and uses the pushed tag.
+#                   This is the normal path for new releases.
+#
+#   2. workflow_dispatch: a maintainer can manually fire the workflow
+#                   against an existing tag (e.g., to retroactively attest
+#                   a release whose initial tag push didn't fire the
+#                   workflow because the workflow file was introduced in
+#                   the same commit — GitHub's first-run chicken-and-egg).
+#                   Provide the tag as the "tag" input.
+#
+# Why this exists: Obsidian's Community Plugins scorecard flags release
+# assets that are missing GitHub artifact attestations. Locally-uploaded
+# assets can't be meaningfully attested (the trust model wants "this binary
+# was produced by this workflow from this commit"), so the build is owned
+# by CI.
+#
+# Tag format follows Obsidian's rule: bare semver, no leading "v" (1.0.0,
+# not v1.0.0).
+#
+# Release ownership: this workflow OWNS the release body and asset files
+# for any tag it processes. On workflow_dispatch re-runs against an
+# existing release, the body is replaced by the matching CHANGELOG slice
+# and the named assets (main.js, manifest.json, styles.css, install zip)
+# are re-uploaded with sigstore attestations. Any handcrafted edits to a
+# release body or those asset files will be reverted by the next run —
+# do not maintain release content manually.
+#
+# Security notes: every run: block uses $TAG_NAME (env-var form, derived
+# from controlled sources — either a pushed Git tag, which Git constrains
+# to a safe character set, or the workflow_dispatch input, which only a
+# repo maintainer can supply). The Validate-TAG_NAME-shape step rejects
+# any tag value that doesn't match the bare-semver-plus-optional-suffix
+# shape, defending against typos in workflow_dispatch inputs and against
+# any regex-metachar splice into the awk pattern that extracts CHANGELOG
+# release notes. Values from controlled files (CHANGELOG, manifest) are
+# also used. No user-controlled event payload is spliced into a shell.
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+-*'  # pre-release tags (rc1, rc2, …)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re-)build and attest, e.g. 1.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write       # create/update the GitHub Release
+  id-token: write       # OIDC token used for sigstore signing
+  attestations: write   # publish the attestation to GitHub
+
+env:
+  TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate TAG_NAME shape
+        run: |
+          if ! echo "$TAG_NAME" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[A-Za-z0-9.]+)?$'; then
+            echo "TAG_NAME '$TAG_NAME' does not match expected semver shape (X.Y.Z or X.Y.Z-suffix; no leading zeros)"
+            exit 1
+          fi
+          echo "TAG_NAME validated: $TAG_NAME"
+
+      - name: Checkout the tagged commit (with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies (clean, deterministic)
+        run: |
+          npm ci
+          (cd vendor/gryphon && npm ci)
+
+      - name: Build plugin bundle
+        run: npm run build:all
+
+      - name: Verify build outputs are present
+        run: |
+          test -f .obsidian/plugins/athena/main.js       || { echo "main.js missing after build"; exit 1; }
+          test -f .obsidian/plugins/athena/manifest.json || { echo "manifest.json missing after build"; exit 1; }
+          test -f .obsidian/plugins/athena/styles.css    || { echo "styles.css missing after build"; exit 1; }
+          ls -la .obsidian/plugins/athena/
+
+      - name: Verify tag matches manifest.version
+        run: |
+          MANIFEST_VERSION=$(node -p "require('./manifest.json').version")
+          if [ "$TAG_NAME" != "$MANIFEST_VERSION" ]; then
+            echo "Tag $TAG_NAME does not match manifest.version $MANIFEST_VERSION"
+            exit 1
+          fi
+          echo "Tag and manifest agree on version: $TAG_NAME"
+
+      - name: Stage release assets at repo root
+        run: |
+          cp .obsidian/plugins/athena/main.js       main.js
+          cp .obsidian/plugins/athena/manifest.json manifest.json
+          cp .obsidian/plugins/athena/styles.css    styles.css
+          # 1.0.9+: ship Athena's Python synthesis sources alongside the
+          # JS bundle so Community Plugins users get full synthesis with
+          # only a Python install + `pip install pydantic`. Without this
+          # copy the release zip is JS-only and the plugin ENOENTs on
+          # bin/lib/wiki_page.py at first kb add.
+          cp -r .obsidian/plugins/athena/bin        bin
+
+      - name: Build install zip
+        run: |
+          mkdir -p dist
+          zip -r "dist/athena-${TAG_NAME}.zip" \
+            main.js manifest.json styles.css bin
+
+      - name: Attest build provenance for release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+            dist/athena-${{ env.TAG_NAME }}.zip
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          awk -v ver="$TAG_NAME" '
+            $0 ~ "^## \\[" ver "\\]" { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "Could not extract notes for $TAG_NAME from CHANGELOG.md"
+            exit 1
+          fi
+          echo "notes-file=/tmp/release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: "Athena ${{ env.TAG_NAME }}"
+          body_path: ${{ steps.notes.outputs.notes-file }}
+          prerelease: ${{ contains(env.TAG_NAME, '-') }}
+          files: |
+            main.js
+            manifest.json
+            styles.css
+            dist/athena-${{ env.TAG_NAME }}.zip
