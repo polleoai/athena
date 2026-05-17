@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Strip the redundant `- **URL:** <url>` line from existing raw/*.md
+files. The URL already appears in the wiki page's Source line;
+repeating it in the Local Copy body is clutter.
+
+Only removes the exact bullet form produced by kb-capture / ingest-file.
+Does NOT touch:
+  - Web Clipper clippings (frontmatter `source:` field — stays; that's
+    a different convention from the Obsidian extension)
+  - Raw file templates (_TEMPLATE.md stays untouched)
+  - URLs that appear mid-body as part of the content
+
+Idempotent — running twice is a no-op.
+
+Usage:
+    python3 bin/kb-strip-raw-urls              # dry-run
+    python3 bin/kb-strip-raw-urls --apply
+"""
+
+import os
+import re
+import sys
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# Match just the URL bullet on its own line. Anchored to a line boundary
+# and paired with the surrounding newline so the removal doesn't leave
+# a dangling blank line.
+URL_BULLET_RE = re.compile(r'^-\s+\*\*URL:\*\*\s+https?://\S+\s*\n', re.MULTILINE)
+
+
+def process(path, apply):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return 0
+
+    new_text, n = URL_BULLET_RE.subn('', text, count=1)
+    if n > 0 and apply:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+    return n
+
+
+def main():
+    apply = '--apply' in sys.argv
+    raw_root = os.path.join(VAULT_ROOT, 'raw')
+    updated = []
+    for root, _, files in os.walk(raw_root):
+        for fn in files:
+            if fn == '_TEMPLATE.md' or not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            n = process(path, apply)
+            if n > 0:
+                updated.append(os.path.relpath(path, VAULT_ROOT))
+
+    print(f'{"APPLYING" if apply else "DRY RUN"} — {len(updated)} raw file(s) have a URL bullet to strip')
+    for p in updated[:10]:
+        print(f'  {p}')
+    if len(updated) > 10:
+        print(f'  ... and {len(updated) - 10} more')
+    if not apply and updated:
+        print('\nRe-run with --apply to execute.')
+
+
+if __name__ == '__main__':
+    main()
