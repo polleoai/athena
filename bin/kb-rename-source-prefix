@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Normalize all wiki page titles to the current naming convention.
+
+Delegates to `apply_naming_convention` (the same function used during
+ingest and by `kb lint`) so there's one source of truth. This means:
+
+  - Legacy prefixes get rewritten (`Git — ` → `GitHub:`, `X — ` → `X:`, ...)
+  - Missing prefixes get added (`arXiv:` for arxiv URLs, `YouTube:` for
+    youtube, `PDF:` for PDF files without a platform match, etc.)
+  - Any future change to the convention propagates here automatically
+
+Updates per renamed page:
+  - the wiki file name itself
+  - the frontmatter `title:` field inside the file
+  - every wikilink in the vault pointing at the old name
+    (bare, aliased, heading, heading+alias forms)
+  - `related:` frontmatter lists (same wikilink form)
+  - inbox/url-resolved.tsv (description column stores page names)
+
+Close Obsidian before running — the file watcher can race against
+the rename and create duplicate phantom entries in the graph.
+
+Usage:
+    python3 bin/kb-rename-source-prefix               # dry-run (default)
+    python3 bin/kb-rename-source-prefix --apply       # actually change
+"""
+
+import os
+import re
+import sys
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, os.path.join(SCRIPT_DIR, 'lib'))
+from wiki_page import apply_naming_convention  # noqa: E402
+
+# Same sanitization Athena applies to filenames in build_wiki_page:
+#   - "/" → "-" (path component separator)
+#   - strip filesystem-forbidden chars
+#   - trim, cap at 75 chars
+_FS_FORBIDDEN_RE = re.compile(r'[*?"<>|]')
+FM_TITLE_RE = re.compile(r'^title:\s*["\'](?P<title>.+?)["\']\s*$', re.MULTILINE)
+FM_URL_RE = re.compile(r'^url:\s*["\']?(?P<url>https?://[^"\'\s]+)', re.MULTILINE)
+FM_TYPE_RE = re.compile(r'^source_type:\s*["\']?(?P<t>[a-z]+)', re.MULTILINE)
+
+
+def _sanitize_filename(title):
+    clean = title.replace('/', '-')
+    clean = _FS_FORBIDDEN_RE.sub('', clean).strip()[:75]
+    return clean
+
+
+# Prefixes we consider "canonical" — if the title already starts with
+# one of these, we don't touch it (even if apply_naming_convention would
+# produce something different). This lets user-curated descriptive
+# titles coexist with auto-generated ones without getting clobbered.
+_CANONICAL_PREFIXES = (
+    'X:', 'GitHub:', 'LinkedIn:', 'YouTube:', 'arXiv:',
+    'PDF:', 'Word:', 'Excel:', 'PowerPoint:', 'Markdown:', 'Text:', 'CSV:',
+)
+
+# Legacy prefixes we DO rewrite even when the page wouldn't otherwise be
+# rebuilt — these are the "X — ", "Git — " style holdovers.
+_LEGACY_PREFIX_PATTERN = re.compile(
+    r'^(X|Git|GitHub|LinkedIn)\s*—\s*', re.IGNORECASE,
+)
+
+# Platform URL patterns that SHOULD get a prefix added even when the
+# title currently has no prefix at all. Scoped to platforms where the
+# title alone is usually ambiguous (a tweet's one-liner, a YouTube
+# title from a common channel, an arXiv paper's academic-neutral name).
+# NOT including github — many github repo pages have descriptive,
+# user-curated titles we want to preserve as-is.
+_ADD_PREFIX_IF_MISSING_PATTERNS = [
+    (re.compile(r'x\.com|twitter\.com', re.IGNORECASE), 'is_tweet'),
+    (re.compile(r'linkedin\.com', re.IGNORECASE), 'is_linkedin'),
+    (re.compile(r'youtube\.com|youtu\.be', re.IGNORECASE), 'is_youtube'),
+    (re.compile(r'arxiv\.org', re.IGNORECASE), 'is_arxiv'),
+]
+
+
+def _collect_renames():
+    """Walk wiki/ and collect pages that need renaming. Two criteria:
+      (1) title starts with a legacy em-dash prefix (X — , Git —, etc.)
+      (2) url is from X/LinkedIn/YouTube/arXiv and title has NO prefix
+    In both cases we run the canonical function to produce the new title."""
+    renames = []
+    wiki_dir = os.path.join(VAULT_ROOT, 'wiki')
+    for root, _, files in os.walk(wiki_dir):
+        if any(seg in root for seg in ('/dashboards', '/topics', '/entities')):
+            continue
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            old_path = os.path.join(root, fn)
+            try:
+                with open(old_path, 'r', encoding='utf-8') as f:
+                    head = f.read(2000)
+            except OSError:
+                continue
+            tm = FM_TITLE_RE.search(head)
+            um = FM_URL_RE.search(head)
+            if not tm or not um:
+                continue
+            old_title = tm.group('title')
+            url = um.group('url')
+            stm = FM_TYPE_RE.search(head)
+            source_type = stm.group('t') if stm else 'webpage'
+
+            has_canonical = any(old_title.startswith(p) for p in _CANONICAL_PREFIXES)
+            has_legacy = bool(_LEGACY_PREFIX_PATTERN.match(old_title))
+            needs_added_prefix = (
+                not has_canonical and not has_legacy and
+                any(pat.search(url) for pat, _ in _ADD_PREFIX_IF_MISSING_PATTERNS)
+            )
+
+            if not (has_legacy or needs_added_prefix):
+                continue
+
+            new_title = apply_naming_convention(old_title, url, source_type, truncate=False)
+            if new_title == old_title:
+                continue
+            old_name = _sanitize_filename(old_title)
+            new_name = _sanitize_filename(new_title)
+            new_path = os.path.join(root, new_name + '.md')
+            renames.append({
+                'old_path': old_path, 'new_path': new_path,
+                'old_title': old_title, 'new_title': new_title,
+                'old_name': old_name,   'new_name': new_name,
+            })
+    return renames
+
+
+def _rewrite_title_field(path, old_title, new_title):
+    """Update the frontmatter `title:` line. Falls back silently if
+    the exact-match line isn't found (shouldn't happen given how we
+    discovered the page, but be defensive)."""
+    with open(path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    # Match only in the frontmatter block — simplest is to replace the
+    # first occurrence of the exact `title: "<old>"` line.
+    patterns = [
+        f'title: "{old_title}"',
+        f"title: '{old_title}'",
+    ]
+    for pat in patterns:
+        if pat in text:
+            replacement = pat.replace(old_title, new_title)
+            text = text.replace(pat, replacement, 1)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            return True
+    return False
+
+
+def _build_link_rewriter(title_map):
+    """Build a single regex that matches any old title inside a
+    wikilink, followed by a terminator (], |, #). Using one pass is
+    much cheaper than 131 independent passes.
+
+    Match groups let us look up the target and rebuild the link.
+    Escaping is important — titles can contain regex metacharacters."""
+    # Sort longest-first so "X — A — B" is tried before "X — A"
+    sorted_old = sorted(title_map, key=len, reverse=True)
+    alt = '|'.join(re.escape(t) for t in sorted_old)
+    # (?=...) lookahead keeps the terminator out of the match so we
+    # rebuild the link cleanly. We match two wikilink shapes:
+    #   - [[Title]]  / [[Title|alias]]  / [[Title#heading]]  / [[Title#heading|alias]]
+    #   - related:   - "[[Title]]"   (frontmatter list — same link shape)
+    return re.compile(r'\[\[(' + alt + r')(?=[\]|#])')
+
+
+def _rewrite_links_in_file(path, rewriter, title_map):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return 0
+    new_text, n = rewriter.subn(
+        lambda m: '[[' + title_map[m.group(1)],
+        text,
+    )
+    if n > 0:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+    return n
+
+
+def _walk_markdown_files(vault_root):
+    """Yield every .md file in the vault, skipping plugin internals
+    and the trash. Raw files can contain wikilinks too (cross-reference
+    notes), so include them."""
+    skip_dirs = {'.obsidian', '.git', '.kb-trash', 'node_modules'}
+    for root, dirs, files in os.walk(vault_root):
+        # In-place prune
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fn in files:
+            if fn.endswith('.md'):
+                yield os.path.join(root, fn)
+
+
+def _rewrite_tsv(path, title_map, dry_run):
+    """url-resolved.tsv's `description` column stores page names. Same
+    substitution — the column is tab-delimited and the title is a bare
+    string (no wikilink brackets), so we match whole-field only."""
+    if not os.path.exists(path):
+        return 0
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    changed = 0
+    for i, line in enumerate(lines):
+        parts = line.rstrip('\n').split('\t')
+        # description is column 1 (0-indexed) in the captured format
+        if len(parts) > 1 and parts[1] in title_map:
+            parts[1] = title_map[parts[1]]
+            lines[i] = '\t'.join(parts) + '\n'
+            changed += 1
+    if changed and not dry_run:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+    return changed
+
+
+def main():
+    apply = '--apply' in sys.argv
+
+    renames = _collect_renames()
+    if not renames:
+        print('No pages match any rename prefix. Nothing to do.')
+        return
+
+    # Check for filename collisions before applying anything.
+    collisions = []
+    for r in renames:
+        if r['old_path'] != r['new_path'] and os.path.exists(r['new_path']):
+            collisions.append(r)
+    if collisions:
+        print(f'ERROR: {len(collisions)} rename(s) would clobber an existing file:')
+        for r in collisions[:10]:
+            print(f'  {r["new_path"]}  (from {os.path.basename(r["old_path"])})')
+        print('Resolve these first (e.g., delete the duplicate).')
+        sys.exit(1)
+
+    title_map = {r['old_title']: r['new_title'] for r in renames}
+
+    print(f'{"APPLYING" if apply else "DRY RUN"} — {len(renames)} page(s) to rename')
+    # Group by new-prefix (what they're becoming) for a readable summary.
+    import collections
+    by_new_prefix = collections.Counter()
+    for r in renames:
+        m = re.match(r'^([A-Za-z]+:)', r['new_title'])
+        by_new_prefix[m.group(1) if m else '(no prefix)'] += 1
+    for k, v in sorted(by_new_prefix.items()):
+        print(f'  {v:3}  -> {k}')
+    print()
+
+    if not apply:
+        print('Sample of renames (first 5):')
+        for r in renames[:5]:
+            print(f'  "{r["old_title"]}"')
+            print(f'    -> "{r["new_title"]}"')
+        print()
+
+    # Sweep the vault to count linkable hits before applying.
+    rewriter = _build_link_rewriter(title_map)
+    total_links = 0
+    files_touched = 0
+    for path in _walk_markdown_files(VAULT_ROOT):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        n = len(rewriter.findall(text))
+        if n > 0:
+            total_links += n
+            files_touched += 1
+    print(f'Wikilinks to update: {total_links} across {files_touched} file(s)')
+
+    tsv_path = os.path.join(VAULT_ROOT, 'inbox', 'url-resolved.tsv')
+    tsv_changes = _rewrite_tsv(tsv_path, title_map, dry_run=True)
+    print(f'url-resolved.tsv row(s) to update: {tsv_changes}')
+
+    if not apply:
+        print()
+        print('Re-run with --apply to execute.')
+        return
+
+    # ── APPLY phase ────────────────────────────────────────────────
+    # Order matters: (1) edit frontmatter title in place while the old
+    # filename is still in effect, (2) rename files, (3) rewrite
+    # wikilinks across the vault using the title map, (4) rewrite TSV.
+    print()
+    print('Step 1/4: updating frontmatter title fields...')
+    for r in renames:
+        if not _rewrite_title_field(r['old_path'], r['old_title'], r['new_title']):
+            print(f'  WARN: title line not found in {r["old_path"]}')
+
+    print('Step 2/4: renaming files...')
+    for r in renames:
+        if r['old_path'] != r['new_path']:
+            os.rename(r['old_path'], r['new_path'])
+
+    print('Step 3/4: rewriting wikilinks across vault...')
+    total_applied = 0
+    for path in _walk_markdown_files(VAULT_ROOT):
+        total_applied += _rewrite_links_in_file(path, rewriter, title_map)
+    print(f'  {total_applied} wikilink(s) rewritten')
+
+    print('Step 4/4: rewriting url-resolved.tsv...')
+    applied_tsv = _rewrite_tsv(tsv_path, title_map, dry_run=False)
+    print(f'  {applied_tsv} row(s) rewritten')
+
+    print()
+    print(f'Done. {len(renames)} pages renamed, {total_applied} links updated.')
+
+
+if __name__ == '__main__':
+    main()
