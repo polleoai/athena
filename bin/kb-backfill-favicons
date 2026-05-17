@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Backfill favicons into existing wiki pages.
+
+Scans every wiki/**/*.md, extracts url: from frontmatter, ensures the
+favicon is cached, and rewrites the Source line to embed the favicon.
+Idempotent: pages that already have a favicon embed are skipped.
+
+Usage:
+    python3 bin/kb-backfill-favicons [--dry-run]
+"""
+
+import os
+import re
+import sys
+
+
+# Resolve vault root as the directory containing this script's parent.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, os.path.join(SCRIPT_DIR, 'lib'))
+import favicons  # noqa: E402
+
+
+FRONTMATTER_URL_RE = re.compile(
+    r'^url:\s*[\'"]?(https?://[^\'"\s]+)[\'"]?\s*$',
+    re.MULTILINE,
+)
+
+# The Source line starts: [Source](<url>) — Local Copy + trailing extras
+# are optional. Webpages have `· [[raw|Local Copy]]`; GitHub repos append
+# stars/license after Local Copy; videos often have Source alone. We
+# treat everything after the "[Source](...)" as a single trailing group
+# and preserve it verbatim on rewrite.
+SOURCE_LINE_RE = re.compile(
+    r'^(?P<prefix>[^\n\[]*?)\[Source\]\((?P<url>[^)]+)\)(?P<suffix>[^\n]*)$',
+    re.MULTILINE,
+)
+
+
+def process_file(path, dry_run):
+    """Returns one of: 'skipped-no-url', 'skipped-has-favicon',
+    'skipped-no-source-line', 'updated', 'updated-emoji', 'failed'."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return 'failed'
+
+    url_match = FRONTMATTER_URL_RE.search(text)
+    if not url_match:
+        return 'skipped-no-url'
+    url = url_match.group(1)
+
+    src_match = SOURCE_LINE_RE.search(text)
+    if not src_match:
+        return 'skipped-no-source-line'
+
+    # Idempotent: if the line already has a favicon embed, skip.
+    prefix = src_match.group('prefix')
+    if '![[' in prefix or prefix.strip():
+        # prefix is non-empty — some icon (embed OR emoji OR other markup)
+        # is already present. Don't touch.
+        return 'skipped-has-favicon'
+
+    suffix = src_match.group('suffix') or ''
+
+    # Resolve icon: cached/fetched favicon, else emoji fallback.
+    icon_path = None if dry_run else favicons.ensure_favicon(url, VAULT_ROOT)
+    if icon_path:
+        icon = f'![[{icon_path}|16]]'
+        result = 'updated'
+    else:
+        # In dry-run we still produce the preview icon from the emoji
+        # table (no network). In real run the emoji fallback triggers
+        # only on fetch failure.
+        icon = favicons.domain_emoji(url)
+        result = 'updated-emoji'
+
+    # Preserve everything after "[Source](url)" — Local Copy link (if
+    # any), GitHub metadata, etc. — so we don't lose trailing content.
+    new_line = f'{icon} [Source]({url}){suffix}'
+    new_text = SOURCE_LINE_RE.sub(lambda _: new_line, text, count=1)
+
+    if not dry_run and new_text != text:
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+        except OSError:
+            return 'failed'
+    return result
+
+
+def main():
+    dry_run = '--dry-run' in sys.argv
+    wiki_dir = os.path.join(VAULT_ROOT, 'wiki')
+    if not os.path.isdir(wiki_dir):
+        print(f'error: {wiki_dir} not found', file=sys.stderr)
+        sys.exit(1)
+
+    stats = {k: 0 for k in [
+        'updated', 'updated-emoji', 'skipped-no-url',
+        'skipped-has-favicon', 'skipped-no-source-line', 'failed',
+    ]}
+
+    for root, _, files in os.walk(wiki_dir):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            result = process_file(path, dry_run)
+            stats[result] += 1
+            if result in ('updated', 'updated-emoji'):
+                rel = os.path.relpath(path, VAULT_ROOT)
+                tag = '[emoji]' if result == 'updated-emoji' else '[icon] '
+                print(f'  {tag} {rel}')
+
+    print()
+    print(f"{'DRY RUN — ' if dry_run else ''}Summary:")
+    for k, v in stats.items():
+        if v > 0:
+            print(f'  {k:26} {v}')
+
+
+if __name__ == '__main__':
+    main()

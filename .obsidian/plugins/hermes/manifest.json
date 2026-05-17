@@ -1,0 +1,10 @@
+{
+  "id": "hermes",
+  "name": "Hermes",
+  "version": "0.2.0",
+  "minAppVersion": "1.0.0",
+  "description": "Claude chat for Obsidian — read and edit vault files, run tools. Works with Claude Code CLI (subscription) or Anthropic API (pay-per-token).",
+  "author": "Grandmont Capital",
+  "authorUrl": "https://github.com/jivebug/hermes-obsidian",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,461 @@
+/* Hermes — Terminal-style interface */
+
+/* Remove Obsidian's default view padding so scrollbar reaches window edge */
+.view-content:has(.hermes-container) {
+  padding: 0 !important;
+}
+
+.hermes-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background-primary);
+  font-family: var(--font-monospace);
+  font-size: 13px;
+}
+
+/* Header removed — title and stop moved to status bar */
+
+.hermes-btn-stop {
+  font-family: var(--font-monospace);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.hermes-btn-stop:hover {
+  border-color: var(--color-red);
+  color: var(--color-red);
+}
+
+/* Terminal output area */
+.hermes-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.5;
+}
+
+/* Keep text from touching the scrollbar */
+.hermes-message {
+  padding-right: 12px;
+}
+
+/* User input — prompt style */
+.hermes-user {
+  display: flex;
+}
+
+.hermes-bubble-user {
+  background: transparent;
+  padding: 2px 0;
+  width: 100%;
+}
+
+.hermes-prompt-prefix {
+  color: var(--color-green);
+  font-weight: 600;
+  user-select: none;
+}
+
+.hermes-bubble-user .hermes-text {
+  color: var(--text-normal);
+  white-space: pre-wrap;
+  display: inline;
+}
+
+/* Assistant output — plain text flow */
+.hermes-assistant {
+  display: flex;
+}
+
+.hermes-bubble-assistant {
+  background: transparent;
+  padding: 2px 0 6px 0;
+  width: 100%;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+  margin-bottom: 4px;
+}
+
+.hermes-bubble-assistant .hermes-text {
+  color: var(--text-normal);
+  line-height: 1.6;
+}
+
+/* Markdown in output */
+.hermes-bubble-assistant .hermes-text p {
+  margin: 0 0 6px 0;
+}
+
+.hermes-bubble-assistant .hermes-text p:last-child {
+  margin-bottom: 0;
+}
+
+.hermes-bubble-assistant .hermes-text pre {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.hermes-bubble-assistant .hermes-text code {
+  font-size: 12px;
+  background: var(--background-secondary);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.hermes-bubble-assistant .hermes-text ul,
+.hermes-bubble-assistant .hermes-text ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.hermes-bubble-assistant .hermes-text li {
+  margin: 2px 0;
+}
+
+.hermes-bubble-assistant .hermes-text h1,
+.hermes-bubble-assistant .hermes-text h2,
+.hermes-bubble-assistant .hermes-text h3 {
+  margin: 8px 0 4px 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.hermes-bubble-assistant .hermes-text table {
+  font-size: 12px;
+  border-collapse: collapse;
+  margin: 4px 0;
+}
+
+.hermes-bubble-assistant .hermes-text th,
+.hermes-bubble-assistant .hermes-text td {
+  padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* Ensure text is selectable in messages */
+.hermes-messages {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Streaming cursor — block style like a terminal */
+.hermes-streaming::after {
+  content: "\2588";
+  animation: hermes-blink 0.8s step-end infinite;
+  color: var(--text-accent);
+  font-size: 13px;
+}
+
+@keyframes hermes-blink {
+  50% { opacity: 0; }
+}
+
+.hermes-cursor {
+  animation: hermes-blink 0.8s step-end infinite;
+  color: var(--text-accent);
+}
+
+/* ── Autocomplete dropdown ── */
+
+.hermes-autocomplete {
+  position: relative;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  margin: 0 12px;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  z-index: 10;
+}
+
+.hermes-ac-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 8px;
+  cursor: pointer;
+  gap: 12px;
+}
+
+.hermes-ac-item:hover,
+.hermes-ac-active {
+  background: var(--background-modifier-hover);
+}
+
+/* When keyboard navigation is active, suppress :hover so a stationary
+   mouse cursor doesn't keep highlighting an item after the keyboard
+   focus has moved away (was bug R6-6). The class is cleared on the
+   first mousemove inside the dropdown. */
+.hermes-autocomplete.hermes-ac-kbnav .hermes-ac-item:hover {
+  background: transparent;
+}
+
+.hermes-ac-cmd {
+  color: var(--text-normal);
+  white-space: nowrap;
+}
+
+.hermes-ac-desc {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Status is shown inline inside .hermes-streaming, cursor blinks after it */
+
+/* System messages */
+.hermes-system {
+  display: flex;
+}
+
+.hermes-system-text {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 2px 0;
+}
+
+/* Cost info */
+.hermes-cost {
+  display: flex;
+  padding: 0;
+}
+
+.hermes-cost-text {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* ── Input toolbar — model / permission / context ── */
+
+.hermes-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.hermes-toolbar-btn {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 3px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.hermes-toolbar-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.hermes-toolbar-sep {
+  font-size: 10px;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.hermes-toolbar-spacer {
+  flex: 1;
+}
+
+.hermes-toolbar-item {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 1px 4px;
+}
+
+/* Permission mode highlights */
+.hermes-perm-yolo {
+  color: var(--color-red) !important;
+  font-weight: 600;
+}
+
+/* Context meter states */
+.hermes-context-warn {
+  color: var(--color-yellow) !important;
+}
+
+.hermes-context-danger {
+  color: var(--color-red) !important;
+  font-weight: 600;
+}
+
+/* ── Status bar: Athena: <status>  [Stop] ── */
+.hermes-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 2px;
+  border-top: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+  min-height: 22px;
+}
+
+.hermes-statusbar-label {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.hermes-statusbar-text {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-accent);
+  font-style: italic;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Input area — terminal prompt ── */
+
+.hermes-input-area {
+  display: flex;
+  gap: 0;
+  padding: 4px 12px 8px 12px;
+  flex-shrink: 0;
+  align-items: flex-end;
+}
+
+.hermes-input-prompt {
+  color: var(--color-green);
+  font-weight: 600;
+  font-family: var(--font-monospace);
+  font-size: 13px;
+  padding: 6px 6px 6px 0;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.hermes-input {
+  flex: 1;
+  resize: none;
+  min-height: 22px;
+  max-height: 150px;
+  padding: 6px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: 13px;
+  font-family: var(--font-monospace);
+  line-height: 1.5;
+  overflow-y: auto;
+  outline: none;
+}
+
+.hermes-input::placeholder {
+  color: var(--text-faint);
+}
+
+.hermes-btn-send {
+  display: none;
+}
+
+/* ── Welcome / onboarding panel (chat empty-state when no provider) ── */
+
+.hermes-welcome {
+  margin: 16px 12px;
+  padding: 20px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.hermes-welcome h2 {
+  margin: 0 0 8px 0;
+  font-size: 1.4em;
+}
+
+.hermes-welcome > p {
+  margin: 0 0 16px 0;
+  color: var(--text-muted);
+  font-size: 0.95em;
+}
+
+.hermes-welcome-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hermes-welcome-card {
+  padding: 14px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.hermes-welcome-card h3 {
+  margin: 0 0 6px 0;
+  font-size: 1em;
+}
+
+.hermes-welcome-card p {
+  margin: 0 0 12px 0;
+  color: var(--text-muted);
+  font-size: 0.9em;
+  flex-grow: 1;
+}
+
+.hermes-welcome-card a,
+.hermes-welcome-card button {
+  align-self: flex-start;
+  font-size: 0.9em;
+}
+
+.hermes-welcome-dismiss {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.hermes-welcome-dismiss:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
+}
+
+/* ── Settings quick-start callout ── */
+
+.hermes-setting-callout {
+  margin: 0 0 20px 0;
+  padding: 12px 14px;
+  background: var(--background-secondary);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 4px;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
