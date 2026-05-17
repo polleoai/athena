@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kb-setup — One-shot installation for the Knowledge Base
+#
+# Run once: ./bin/kb-setup
+# Or:       chmod +x bin/kb-setup && ./bin/kb-setup
+
+KB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "Athena Setup"
+echo "============"
+echo ""
+
+# ── Check required dependencies ──────────────────────
+
+MISSING=0
+
+echo "Required:"
+
+echo -n "  python3:  "
+if command -v python3 &>/dev/null; then
+  echo "$(python3 --version 2>&1 | head -1)"
+else
+  echo "MISSING — install from https://python.org or 'brew install python3'"
+  MISSING=$((MISSING + 1))
+fi
+
+echo -n "  node:     "
+if command -v node &>/dev/null; then
+  echo "$(node --version)"
+else
+  echo "MISSING — install from https://nodejs.org or 'brew install node'"
+  MISSING=$((MISSING + 1))
+fi
+
+echo -n "  curl:     "
+if command -v curl &>/dev/null; then
+  echo "$(curl --version | head -1 | cut -d' ' -f1-2)"
+else
+  echo "MISSING — install via your package manager"
+  MISSING=$((MISSING + 1))
+fi
+
+if [ "$MISSING" -gt 0 ]; then
+  echo ""
+  echo "ERROR: ${MISSING} required dependency(ies) missing. Install them first."
+  exit 1
+fi
+
+echo ""
+
+# ── Auto-install optional tools silently ─────────────
+# These enhance capture quality but are not user-facing
+OPTIONAL_MISSING=""
+if ! command -v yt-dlp &>/dev/null; then
+  OPTIONAL_MISSING="${OPTIONAL_MISSING}yt-dlp "
+fi
+if ! command -v gh &>/dev/null; then
+  OPTIONAL_MISSING="${OPTIONAL_MISSING}gh "
+fi
+
+if [ -n "$OPTIONAL_MISSING" ]; then
+  echo "Installing optional tools for better capture quality..."
+  for tool in $OPTIONAL_MISSING; do
+    echo -n "  ${tool}: "
+    if command -v brew &>/dev/null; then
+      if brew install "$tool" &>/dev/null; then
+        echo "installed"
+      else
+        echo "skipped (install manually: brew install ${tool})"
+      fi
+    elif command -v pip3 &>/dev/null && [ "$tool" = "yt-dlp" ]; then
+      if pip3 install --quiet "$tool" &>/dev/null; then
+        echo "installed"
+      else
+        echo "skipped"
+      fi
+    else
+      echo "skipped (no package manager found)"
+    fi
+  done
+  echo ""
+fi
+
+# ── Create directory structure ───────────────────────
+
+echo "Setting up directories..."
+for dir in raw/papers raw/webpages raw/repos raw/images raw/videos raw/assets \
+           wiki/format/papers wiki/format/repos wiki/format/webpages wiki/format/images \
+           wiki/format/videos wiki/format/entities wiki/format/comparisons \
+           wiki/topics wiki/dashboards \
+           docs bin/lib .kb-trash; do
+  mkdir -p "${KB_ROOT}/${dir}"
+done
+echo "  Directories: OK"
+
+# ── Create tracking files ────────────────────────────
+
+for f in inbox/url-new.txt inbox/url-resolved.tsv; do
+  if [ ! -f "${KB_ROOT}/${f}" ]; then
+    touch "${KB_ROOT}/${f}"
+    echo "  Created: ${f}"
+  fi
+done
+echo "  Tracking files: OK"
+
+# ── Make scripts executable ──────────────────────────
+
+chmod +x "${KB_ROOT}/bin/kb" "${KB_ROOT}/bin/kb-capture" "${KB_ROOT}/bin/kb-setup" 2>/dev/null
+echo "  Scripts: OK"
+
+# ── Create index.md if missing ───────────────────────
+
+if [ ! -f "${KB_ROOT}/index.md" ]; then
+  cat > "${KB_ROOT}/index.md" << 'INDEX'
+# Knowledge Base
+
+> 0 sources · 0 wiki pages · Last updated: $(date +%Y-%m-%d)
+
+---
+
+## Quick Navigation
+
+| Browse by... | |
+|---|---|
+| **Recent** | Recently added sources |
+
+INDEX
+  echo "  Created: index.md"
+fi
+
+# ── Create log.md if missing ─────────────────────────
+
+if [ ! -f "${KB_ROOT}/log.md" ]; then
+  cat > "${KB_ROOT}/log.md" << 'LOG'
+# Knowledge Base Activity Log
+
+> Append-only. Each entry uses a consistent prefix for parseability.
+> Format: `## [YYYY-MM-DD] action | Subject`
+> Actions: `ingest`, `query`, `lint`, `update`, `compile`
+
+---
+LOG
+  echo "  Created: log.md"
+fi
+
+echo ""
+echo "Setup complete!"
+echo ""
+echo "Commands:"
+echo "  bin/kb help                    Show all commands"
+echo "  bin/kb add <url>               Add a source"
+echo "  bin/kb stats                   Show counts"
+echo "  bin/kb lint                    Health check"
+echo ""
+echo "For Obsidian:"
+echo "  1. Open Obsidian → Open folder as vault → select ${KB_ROOT}"
+echo "  2. Enable community plugins → install Dataview"
+echo ""
+echo "For AI-powered ingest (Claude Code / OpenAI Codex):"
+echo "  Just say 'kb add <url>' in your AI session"

@@ -1,0 +1,22 @@
+{
+  "name": "athena-plugin",
+  "version": "1.0.9",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "build:gryphon": "cd vendor/gryphon && npm install --silent && npm run build --silent && mkdir -p ../../.obsidian/plugins/gryphon && cp main.js manifest.json styles.css ../../.obsidian/plugins/gryphon/ && mkdir -p ../../.obsidian/plugins/gryphon/hooks && cp -r hooks/* ../../.obsidian/plugins/gryphon/hooks/",
+    "build:all": "git submodule update --init --recursive vendor/gryphon && npm run build:gryphon && npm run build",
+    "kb:auto-ingest": "bin/kb add 2>&1 | tail -50 && python3 scripts/bulk-llm-regen-summaries.py --only-newer-than-mins 5 2>&1 | tail -20",
+    "sync": "git pull --autostash --no-rebase --no-edit origin main && npm run build:all && npm run kb:auto-ingest",
+    "bump-version": "node scripts/bump-version.js",
+    "dev": "node build.js --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0"
+  }
+}
