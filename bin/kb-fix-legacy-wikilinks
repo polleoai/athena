@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Fix wikilinks that still use the legacy "X — ", "Git — ", or
+"LinkedIn — " prefix form after the earlier prefix migration.
+
+The earlier migration's wikilink updater matched only the full-title
+form. Links that used the TRUNCATED-TO-75 filename form survived.
+This script scans every .md file in the vault, builds a reverse map
+from every known legacy form (full title + truncated filename) to
+the current wiki filename, and rewrites each occurrence.
+
+Usage:
+    python3 bin/kb-fix-legacy-wikilinks              # dry-run
+    python3 bin/kb-fix-legacy-wikilinks --apply
+"""
+
+import os
+import re
+import sys
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+FM_TITLE_RE = re.compile(r'^title:\s*["\'](?P<title>.+?)["\']\s*$', re.MULTILINE)
+FILENAME_CAP = 75  # matches build_wiki_page's sanitizer
+
+# Legacy → canonical prefix rewrite. Colon is the current separator.
+_LEGACY_PREFIX = [
+    (re.compile(r'^X\s*—\s*(.*)', re.DOTALL),        'X: '),
+    (re.compile(r'^Git\s*—\s*(.*)', re.DOTALL),      'GitHub: '),
+    (re.compile(r'^GitHub\s*—\s*(.*)', re.DOTALL),   'GitHub: '),
+    (re.compile(r'^LinkedIn\s*—\s*(.*)', re.DOTALL), 'LinkedIn: '),
+]
+
+
+def _current_new_prefix_variant(legacy):
+    """Given a legacy-form string (title or filename like "Git — foo"),
+    return the canonical form ("GitHub: foo"). Returns None if no legacy
+    prefix matches."""
+    for pat, new_prefix in _LEGACY_PREFIX:
+        m = pat.match(legacy)
+        if m:
+            return new_prefix + m.group(1)
+    return None
+
+
+def _build_legacy_map():
+    """Walk all wiki/*.md files, build legacy_form → current_filename
+    map. Each current file contributes up to four entries: full-title +
+    truncated-title forms for both filename-cap flavors (old and new
+    prefix lengths)."""
+    mapping = {}
+    for root, _, files in os.walk(os.path.join(VAULT_ROOT, 'wiki')):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            current_name = fn[:-3]  # strip '.md'
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    head = f.read(2000)
+            except OSError:
+                continue
+            m = FM_TITLE_RE.search(head)
+            if not m:
+                continue
+            current_title = m.group('title')
+            # Only pages with a current canonical prefix could have had
+            # a legacy form that needs rewriting.
+            legacy_prefixes = None
+            if current_title.startswith('X: '):
+                legacy_prefixes = [('X: ', 'X — ')]
+            elif current_title.startswith('GitHub: '):
+                # Git — was the older form; GitHub — (em-dash) was the
+                # intermediate form during one of the earlier migrations.
+                legacy_prefixes = [('GitHub: ', 'Git — '), ('GitHub: ', 'GitHub — ')]
+            elif current_title.startswith('LinkedIn: '):
+                legacy_prefixes = [('LinkedIn: ', 'LinkedIn — ')]
+            if not legacy_prefixes:
+                continue
+            for new_pref, old_pref in legacy_prefixes:
+                tail = current_title[len(new_pref):]
+                # Full legacy title + legacy filename (truncated at 75).
+                legacy_full = old_pref + tail
+                legacy_filename = legacy_full[:FILENAME_CAP].rstrip()
+                mapping[legacy_full] = current_name
+                mapping[legacy_filename] = current_name
+    return mapping
+
+
+def _rewrite_file(path, mapping, apply):
+    """Rewrite wikilinks in one file. Returns number of rewrites."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return 0
+    # Match [[target]] / [[target|alias]] / [[target#heading]] forms.
+    # The target portion ends at ], |, or #. `[^\n\[]*?` as the target
+    # class keeps us from crossing nested brackets or line breaks.
+    pat = re.compile(r'\[\[(?P<target>[^\n\[\]|#]+?)(?=[\]|#])')
+    count = 0
+
+    def _sub(m):
+        nonlocal count
+        target = m.group('target')
+        if target in mapping:
+            count += 1
+            return '[[' + mapping[target]
+        return m.group(0)
+
+    new_text = pat.sub(_sub, text)
+    if count > 0 and apply:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+    return count
+
+
+def main():
+    apply = '--apply' in sys.argv
+    mapping = _build_legacy_map()
+    print(f'Built map with {len(mapping)} legacy → current entries')
+
+    total = 0
+    files_touched = 0
+    for root, _, files in os.walk(os.path.join(VAULT_ROOT, 'wiki')):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            n = _rewrite_file(path, mapping, apply)
+            if n > 0:
+                total += n
+                files_touched += 1
+                print(f'  {"UPDATE" if apply else "WOULD"}: {os.path.relpath(path, VAULT_ROOT)} ({n} link{"s" if n > 1 else ""})')
+
+    print()
+    print(f'{total} legacy wikilink{"s" if total != 1 else ""} across {files_touched} file{"s" if files_touched != 1 else ""}')
+    if not apply:
+        print('Re-run with --apply to execute.')
+
+
+if __name__ == '__main__':
+    main()
