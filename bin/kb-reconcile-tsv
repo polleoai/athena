@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Reconcile inbox/url-resolved.tsv descriptions with current wiki
+page filenames by URL match.
+
+Problem: TSV descriptions drift when wiki titles are renamed, because
+the TSV stores the title as it was when the page was ingested. The URL
+Tracker's "Recently Added" section uses these descriptions as wikilink
+targets ([[description]]), so stale descriptions produce broken links
+— clicking creates an empty page instead of navigating to the real one.
+
+Fix: walk all wiki pages, build a URL → current-filename map, and
+rewrite TSV descriptions that don't match.
+
+Usage:
+    python3 bin/kb-reconcile-tsv              # dry-run
+    python3 bin/kb-reconcile-tsv --apply
+"""
+
+import os
+import re
+import sys
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+FM_TITLE_RE = re.compile(r'^title:\s*["\'](?P<title>.+?)["\']\s*$', re.MULTILINE)
+FM_URL_RE = re.compile(r'^url:\s*["\']?(?P<url>https?://[^"\'\s]+)', re.MULTILINE)
+
+
+def _build_url_to_filename():
+    """Return dict of canonical_url -> wiki_filename (no .md). Uses
+    the frontmatter `url:` field; skips pages without one (topic pages,
+    entities, dashboards)."""
+    mapping = {}
+    wiki_dir = os.path.join(VAULT_ROOT, 'wiki')
+    for root, _, files in os.walk(wiki_dir):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    head = f.read(2000)
+            except OSError:
+                continue
+            url_m = FM_URL_RE.search(head)
+            if not url_m:
+                continue
+            url = url_m.group('url').strip().rstrip(',;')
+            # First writer wins — if two pages claim the same URL, the
+            # first one in alphabetical walk order takes precedence.
+            # Realistically this doesn't happen in a clean vault.
+            if url not in mapping:
+                mapping[url] = fn[:-3]  # strip .md
+    return mapping
+
+
+def main():
+    apply = '--apply' in sys.argv
+    tsv_path = os.path.join(VAULT_ROOT, 'inbox', 'url-resolved.tsv')
+    if not os.path.exists(tsv_path):
+        print(f'error: {tsv_path} not found', file=sys.stderr)
+        sys.exit(1)
+
+    url_to_name = _build_url_to_filename()
+    print(f'Found {len(url_to_name)} wiki pages with URLs')
+
+    with open(tsv_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    changed = 0
+    for i, line in enumerate(lines):
+        parts = line.rstrip('\n').split('\t')
+        if len(parts) < 3:
+            continue
+        status = parts[0]
+        if status in ('status', '#') or status.startswith('#'):
+            continue
+        description = parts[1]
+        url = parts[2].strip()
+        canonical = url_to_name.get(url)
+        if not canonical:
+            continue  # no wiki page for this URL — leave TSV as-is
+        if description == canonical:
+            continue  # already matches
+        parts[1] = canonical
+        lines[i] = '\t'.join(parts) + '\n'
+        changed += 1
+        print(f'  {description!r} -> {canonical!r}')
+
+    print()
+    print(f'{"APPLYING" if apply else "DRY RUN"} — {changed} TSV row{"s" if changed != 1 else ""} would update')
+    if apply and changed > 0:
+        with open(tsv_path, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+        # Regenerate URL Tracker so Recently Added reflects the fix.
+        sys.path.insert(0, os.path.join(SCRIPT_DIR, 'lib'))
+        from wiki_page import generate_url_tracker
+        generate_url_tracker(VAULT_ROOT)
+        print('URL Tracker regenerated.')
+
+
+if __name__ == '__main__':
+    main()
