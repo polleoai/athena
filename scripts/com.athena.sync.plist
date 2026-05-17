@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.athena.sync — hourly local-installation sync for Athena.
+
+  Runs `npm run sync` from the Athena vault every hour. That command:
+    1. git-pulls jivebug/athena main (autostash + merge)
+    2. updates vendor/gryphon submodule to recorded pin
+    3. rebuilds Gryphon's plugin bundle + Athena's plugin bundle
+
+  After the next reload of Athena in Obsidian, the running plugin
+  reflects whatever's currently on jivebug/athena main — including
+  any auto-bumped Gryphon submodule version.
+
+  Install (one-time):
+    cp scripts/com.athena.sync.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.athena.sync.plist
+
+  Or run scripts/install-sync-launchd.sh which does both atomically.
+
+  Inspect:
+    launchctl list | grep com.athena.sync       # is it loaded?
+    tail -f /tmp/athena-sync.log                  # last run output
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.athena.sync.plist
+    rm ~/Library/LaunchAgents/com.athena.sync.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.athena.sync</string>
+
+    <!--
+      Wrap the command in /bin/zsh -c so the shell handles the && pipeline.
+      Absolute paths required: launchd does NOT inherit the user's PATH, so
+      `npm` / `node` / `git` would otherwise be unfound.
+
+      EnvironmentVariables.PATH includes the locations of:
+        - /opt/homebrew/bin  → npm, node (Apple Silicon Homebrew)
+        - /usr/bin           → git, sh, zsh
+        - /usr/local/bin     → fallback for Intel Homebrew users
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-c</string>
+        <string>cd /Users/bugster/Projects/athena &amp;&amp; /opt/homebrew/bin/npm run sync</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!--
+          Order matters. ~/.local/bin first so the user-installed Claude Code
+          (modern 2.x) wins over a stale /usr/local/bin/claude (1.x). The
+          chained kb:auto-ingest script calls claude with 2.x-only flags
+          like --disable-slash-commands.
+        -->
+        <key>PATH</key>
+        <string>/Users/bugster/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/bugster</string>
+    </dict>
+
+    <!-- Run every 3600 seconds (1 hour). Matches the auto-bump CI cron
+         cadence: local catches up within ~2h of any Gryphon release. -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <!-- Don't run at load time — first run waits for the next interval.
+         Avoids surprise builds when you log in. Flip to true if you'd
+         prefer aggressive sync. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Capture stdout + stderr to /tmp for debugging. /tmp is auto-cleaned
+         by macOS so logs don't grow forever. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/athena-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/athena-sync.log</string>
+</dict>
+</plist>
