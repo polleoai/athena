@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Backfill the Local Copy wikilink in existing wiki pages so it points
+to the downloaded binary (PDF, DOCX, XLSX, PPTX, EPUB) when available
+instead of the extracted .md intermediate.
+
+The .md file is still a useful LLM-input artifact (build_wiki_page
+reads it), but users clicking through the Local Copy link expect the
+rendered original — a PDF in a reader, a DOCX in Word, etc.
+
+Usage:
+    python3 bin/kb-backfill-local-copy              # dry-run
+    python3 bin/kb-backfill-local-copy --apply
+"""
+
+import os
+import re
+import sys
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, os.path.join(SCRIPT_DIR, 'lib'))
+from wiki_page import _find_binary_sibling  # noqa: E402
+
+
+SOURCE_LINE_RE = re.compile(
+    r'(?P<prefix>.*?)\[\[(?P<rawpath>[^\]|]+?\.md)\|Local Copy\]\]',
+    re.DOTALL,
+)
+FM_RAW_RE = re.compile(
+    r'^raw_path:\s*["\']?([^"\'\n]+)["\']?\s*$',
+    re.MULTILINE,
+)
+
+
+def process(path, apply):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    fm = FM_RAW_RE.search(text)
+    if not fm:
+        return None
+    raw_path = fm.group(1).strip()
+    binary = _find_binary_sibling(VAULT_ROOT, raw_path)
+    if not binary:
+        return None  # No binary sibling — leave as-is.
+
+    new_text, n = SOURCE_LINE_RE.subn(
+        lambda m: f'{m.group("prefix")}[[{binary}|Local Copy]]',
+        text, count=1,
+    )
+    if n == 0:
+        return None  # no match — possibly already pointing to the binary
+
+    already = f'[[{binary}|Local Copy]]' in text
+    if already:
+        return None
+
+    if apply and new_text != text:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+    return binary
+
+
+def main():
+    apply = '--apply' in sys.argv
+    updated = []
+    skipped = []
+    for root, _, files in os.walk(os.path.join(VAULT_ROOT, 'wiki')):
+        for fn in files:
+            if not fn.endswith('.md'):
+                continue
+            path = os.path.join(root, fn)
+            result = process(path, apply)
+            if result:
+                updated.append((path, result))
+    print(f"{'APPLYING' if apply else 'DRY RUN'} — {len(updated)} page(s) would update Local Copy link")
+    for p, target in updated:
+        print(f'  {os.path.relpath(p, VAULT_ROOT)}  ->  {target}')
+    if not apply and updated:
+        print('\nRe-run with --apply to execute.')
+
+
+if __name__ == '__main__':
+    main()

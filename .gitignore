@@ -1,0 +1,21 @@
+.obsidian-api-key
+.athena/
+__pycache__/
+*.pyc
+*.swp
+.kb-trash/
+scripts/.bulk-regen-state.json
+.obsidian/plugins/dataview/
+.obsidian/plugins/obsidian-local-rest-api/
+.playwright-mcp/
+node_modules
+
+# Per-machine plugin runtime state and LLM chat history (privacy).
+# These are written by Athena/Gryphon at runtime and contain user
+# conversation content, API session metadata, and per-machine paths.
+# Bundle artifacts (main.js, manifest.json, styles.css, hooks/) are
+# still tracked — only data and chat-history are excluded.
+.obsidian/plugins/athena/data.json
+.obsidian/plugins/athena/chat-history.json*
+.obsidian/plugins/gryphon/data.json
+.obsidian/plugins/gryphon/chat-history.json*
