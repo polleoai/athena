@@ -1,0 +1,3 @@
+[submodule "vendor/gryphon"]
+	path = vendor/gryphon
+	url = https://github.com/polleoai/gryphon
