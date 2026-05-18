@@ -722,6 +722,18 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     # source" link to the original page where the video actually plays.
     body = _strip_blob_videos(body, source_url=canonical)
 
+    # Strip trailing `…` (U+2026) from URLs in body text. X.com (and any
+    # site that visually truncates long URLs) shows `https://github.com/
+    # owner/repo…` while the actual HREF points at the full URL. Web
+    # Clipper / Turndown often captures the display text and loses the
+    # HREF, leaving `…` in the URL. Clicking it from Obsidian then URL-
+    # encodes `…` as `%E2%80%A6` and 404s — even when the underlying
+    # path is real. Strip the `…` so the local-copy URL is clickable.
+    # If the truncation chopped real characters, the URL still 404s, but
+    # at least it lands on a normal GitHub/whatever error page the user
+    # can diagnose, not a malformed-URL browser error.
+    body = re.sub(r'(https?://[^\s]*?)…', r'\1', body)
+
     try:
         # Preserve provenance: pass through the clipped_via from the
         # source clip rather than hardcoding "web-clipper". This matters
