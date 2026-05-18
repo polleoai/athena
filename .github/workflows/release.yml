@@ -117,34 +117,22 @@ jobs:
 
       - name: Stage release assets at repo root
         run: |
+          # Obsidian's Community Plugins directory only downloads
+          # main.js, manifest.json, and styles.css from the GitHub
+          # Release. Per the directory's automated review (2026-05-18),
+          # additional release assets like a bundled install zip trigger
+          # a "Recommendation" warning and are never fetched by users.
+          # So we ship only the three supported files.
+          #
+          # NOTE: The Python backend (bin/lib/wiki_page.py etc.) IS
+          # required for full synthesis but is NOT shipped via the
+          # GitHub Release — users who want it clone polleoai/athena
+          # for the full source tree. The plugin still bootstraps as
+          # capture-only without Python backend, and as full-synthesis
+          # when the user has Python + bin/ checked out alongside.
           cp .obsidian/plugins/athena/main.js       main.js
           cp .obsidian/plugins/athena/manifest.json manifest.json
           cp .obsidian/plugins/athena/styles.css    styles.css
-          # 1.0.9+: ship Athena's Python synthesis sources alongside the
-          # JS bundle so Community Plugins users get full synthesis with
-          # only a Python install + `pip install pydantic`. Without this
-          # copy the release zip is JS-only and the plugin ENOENTs on
-          # bin/lib/wiki_page.py at first kb add.
-          # Conditional: pre-1.0.9 tags don't have bin/ bundled in the
-          # plugin tree. Backfill builds for those tags ship JS-only.
-          if [ -d .obsidian/plugins/athena/bin ]; then
-            cp -r .obsidian/plugins/athena/bin bin
-            echo "has_bin=true" >> "$GITHUB_ENV"
-          else
-            echo "bin/ not present in this tag — shipping JS-only release"
-            echo "has_bin=false" >> "$GITHUB_ENV"
-          fi
-
-      - name: Build install zip
-        run: |
-          mkdir -p dist
-          if [ "$has_bin" = "true" ]; then
-            zip -r "dist/athena-${TAG_NAME}.zip" \
-              main.js manifest.json styles.css bin
-          else
-            zip -r "dist/athena-${TAG_NAME}.zip" \
-              main.js manifest.json styles.css
-          fi
 
       - name: Attest build provenance for release assets
         uses: actions/attest-build-provenance@v2
@@ -153,7 +141,6 @@ jobs:
             main.js
             manifest.json
             styles.css
-            dist/athena-${{ env.TAG_NAME }}.zip
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -193,4 +180,3 @@ jobs:
             main.js
             manifest.json
             styles.css
-            dist/athena-${{ env.TAG_NAME }}.zip
