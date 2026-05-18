@@ -61,6 +61,10 @@ permissions:
 
 env:
   TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+  # GitHub forces Node 24 for JavaScript actions on 2026-06-02. Opt in
+  # now so the deprecation warning goes quiet and we don't get caught
+  # by the cut-over. Static value; no untrusted input involved.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   build-and-release:
@@ -146,9 +150,22 @@ jobs:
             capture && /^## \[/ { exit }
             capture { print }
           ' CHANGELOG.md > /tmp/release-notes.md
+          # Fall back to a minimal default note when no `## [X.Y.Z]`
+          # section exists. Auto-bump tags (e.g. Gryphon vendor bumps)
+          # don't ship with a curated changelog entry; before this
+          # fallback they exit 1 and the release never gets created.
+          # The default points users at the commit log + full CHANGELOG
+          # so the release is still informative.
           if [ ! -s /tmp/release-notes.md ]; then
-            echo "Could not extract notes for $TAG_NAME from CHANGELOG.md"
-            exit 1
+            echo "No \`## [$TAG_NAME]\` section in CHANGELOG.md — generating default release notes." >&2
+            {
+              echo "Release $TAG_NAME."
+              echo
+              echo "This release has no curated CHANGELOG section (typically an auto-bump tag — e.g. a Gryphon vendor pin update). See:"
+              echo
+              echo "- The full [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$TAG_NAME/CHANGELOG.md) for context on surrounding releases"
+              echo "- The commit history at [${TAG_NAME}](https://github.com/${GITHUB_REPOSITORY}/commits/$TAG_NAME) for the exact change set"
+            } > /tmp/release-notes.md
           fi
           echo "notes-file=/tmp/release-notes.md" >> "$GITHUB_OUTPUT"
 
