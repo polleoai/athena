@@ -85,10 +85,6 @@ On Ubuntu (especially 22.04+ with Snap-installed Obsidian under AppArmor), Chrom
 
 Up-arrow recall (Gryphon's terminal-style prompt history) reads from the persisted `chat-history.json` on Obsidian launch. If you sent a prompt right before quitting Obsidian — especially while a slow operation was still in flight — the persistence may not have flushed yet, and that prompt won't be in the up-arrow walk after restart. The visible chat bubble survives (it's loaded from the same file, which DID save before quit); only the input-history index doesn't see it. Open issue under investigation for 1.1.
 
-### Pushing a tag to the `polleoai/athena` public mirror
-
-The development repo (`jivebug/athena`, private) and the public release mirror (`polleoai/athena`) are decoupled — the auto-bump CI for Gryphon vendor bumps fires on the private dev repo only. Cutting a public release requires regenerating the public mirror from the private HEAD and pushing the tag there, which triggers the sigstore-attested release workflow. The regen + push step is operator-side and is not automated today; see the maintainer's session memory for the procedure.
-
 ## How it works — three layers
 
 | Layer | What lives here | Who writes it |
