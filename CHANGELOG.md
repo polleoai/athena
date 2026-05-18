@@ -2,6 +2,30 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.1.0 — release pass] — 2026-05-18
+
+Final code review + QA pass before locking 1.1.0 as the canonical release. Three classes of issue surfaced:
+
+### Fixed — Windows UnicodeEncodeError on lone surrogates
+
+The atomic wiki-page write at `bin/lib/wiki_page.py` crashed with `UnicodeEncodeError: 'utf-8' codec can't encode character '\udc8d'` when upstream content contained an unpaired UTF-16 surrogate (e.g. from `errors='surrogateescape'` decoding of mojibake bytes). Wiki pages and raw rewrites now run through a new `_safe_utf8()` helper that replaces lone surrogates with U+FFFD before the write and logs to stderr. The atomic write succeeds; one byte of bad data becomes the replacement character. Four regression tests pin the contract.
+
+### Fixed — defensive quote-strip on URL args in `kb add` / `kb refresh` / `kb regen`
+
+The same regex-capture-with-quotes pattern that caused `kb remove "Foo Bar"` to fail in 1.1.0 also lurked in three URL-taking handlers in `_runKbCommandAsync`. A user typing `kb add "https://x.com/foo"` landed with literal quote chars in `args[0]`, poisoning `canonicalize()` and every downstream lookup. All three now strip surrounding quotes the same way `_kbRemove` / `_kbRename` do.
+
+### Fixed — two stale tests in `TestCreateWikiPageOverwrite`
+
+The two `overwrite=True` tests asserted that `llm_result.body` flowed into the wiki page. The current architecture (synthesis-stub pages, body lives in `raw/`) makes that assertion always false — the wiki page is a placeholder until LLM synthesis fills it in. Tests now assert the `summary:` field delta (which IS written into the frontmatter) to prove the rewrite happened. Test contract is unchanged; only the assertion surface moved to the right field.
+
+### Investigation — Windows LLM-spawn `>` bug
+
+The earlier report (`> was unexpected at this time.` from cmd.exe during LLM CLI spawn) traced to Gryphon's `wrapForCmdShim` (vendor/gryphon/packages/protect/src/win-spawn.js). The vendor escape path DOES caret-escape `>` to `^>` before the cmd.exe `/c` dispatch (see win-spawn.js:143), and all three CLI providers (Claude Code, Codex, Gemini) route through this wrap on Windows. No consumer-side fix is appropriate without modifying vendor — and per `feedback-gryphon-vendoring-principle`, vendor stays read-only. If the bug re-surfaces, capture stderr + spawn args to root-cause.
+
+### Test suite
+
+`tests/test_writers.py`: 110 passing + 1 skipped (Playwright auto-promote needs a browser context). 4 new tests cover the surrogate-sanitization contract.
+
 ## [1.1.0] — 2026-05-17
 
 ### Added — JS-side wiki synthesis (cross-platform)

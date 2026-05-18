@@ -1154,7 +1154,14 @@ class AthenaPlugin extends Plugin {
       if (mechanical.command === "add") {
         console.log("[athena] kb add start", { args: mechanical.args });
         view.startStreamingMessage();
-        const hasUrl = mechanical.args.length > 0 && mechanical.args[0];
+        // Strip surrounding quotes — same regex-capture-with-quotes
+        // class of bug as _kbRemove/_kbRename. A user typing
+        // `kb add "https://x.com/foo"` lands here with literal quote
+        // chars in args[0], which then poisons canonicalize() and
+        // every downstream lookup. Defensive strip keeps the URL
+        // path working regardless of how the user typed it.
+        const rawUrlArg = (mechanical.args[0] || "").trim().replace(/^["']|["']$/g, "");
+        const hasUrl = rawUrlArg.length > 0;
 
         if (!hasUrl) {
           await this._kbAddNoArgs(view);
@@ -1164,7 +1171,7 @@ class AthenaPlugin extends Plugin {
         }
 
         // URL-specific add
-        const url = mechanical.args[0];
+        const url = rawUrlArg;
         const result = await this.ingestContent({ url, source: "kb-add", view });
 
         if (result.status === "duplicate") {
@@ -1258,7 +1265,8 @@ class AthenaPlugin extends Plugin {
       // implementation = works on Windows where the bash `bin/kb` is
       // unavailable.
       if (mechanical.command === "refresh") {
-        const url = mechanical.args[0];
+        // Same defensive quote-strip as kb add — see kb add block above.
+        const url = (mechanical.args[0] || "").trim().replace(/^["']|["']$/g, "");
         view.startStreamingMessage();
         view.updateStatus("Refreshing wiki page...");
         const result = await this._refreshWikiByUrl(url, view);
@@ -1290,7 +1298,10 @@ class AthenaPlugin extends Plugin {
       // synthesis failure during kb add, (b) regenerating after the
       // raw source was updated, (c) bulk backfill of pre-1.1 pages.
       if (mechanical.command === "regen") {
-        const arg = mechanical.args[0];
+        // Same defensive quote-strip as kb add — see kb add block above.
+        // `--all-pending` has no quotes so the strip is a no-op for it;
+        // URL forms benefit from the strip.
+        const arg = (mechanical.args[0] || "").trim().replace(/^["']|["']$/g, "");
         view.startStreamingMessage();
         if (arg === "--all-pending") {
           const pending = findPendingPages(this);
