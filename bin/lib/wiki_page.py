@@ -21,6 +21,30 @@ import json
 import time
 import glob
 
+
+def _safe_utf8(text, label=None):
+    """Replace unpaired surrogates with U+FFFD before a UTF-8 write.
+
+    Strict UTF-8 encoding raises UnicodeEncodeError on lone surrogates
+    (U+D800–U+DFFF). These can land in our strings when upstream bytes
+    were decoded with `errors='surrogateescape'` (the user-reported
+    Windows crash: `\\udc8d` from a mojibake byte). Wiki pages and
+    raw-file rewrites are synthesis artifacts, so dropping the bad
+    code point (replacing with U+FFFD) is preferable to crashing the
+    write. Logs to stderr when sanitization fires so the upstream
+    source can be tracked down.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    if not any('\ud800' <= ch <= '\udfff' for ch in text):
+        return text
+    out = ''.join('�' if '\ud800' <= ch <= '\udfff' else ch for ch in text)
+    where = f' in {label}' if label else ''
+    print(f'[wiki_page] replaced unpaired surrogate(s) with U+FFFD before write{where}',
+          file=sys.stderr)
+    return out
+
+
 # Favicon cache is best-effort — wiki pages render fine without it.
 # Import path-proof against running from different working directories.
 _favicons = None
@@ -1546,7 +1570,7 @@ def create_wiki_page(vault_path, raw_path, url=None, llm_result=None,
             yaml_match = re.match(r'^(---\n.*?\n---\n)', raw_text, re.DOTALL)
             header = yaml_match.group(1) if yaml_match else ''
             with open(full_raw_path, 'w', encoding='utf-8') as f:
-                f.write(header + body + '\n')
+                f.write(_safe_utf8(header + body + '\n', label=full_raw_path))
         except Exception:
             pass
 
@@ -1717,9 +1741,12 @@ def create_wiki_page(vault_path, raw_path, url=None, llm_result=None,
             print(f'[wiki_page] refresh snapshot failed (proceeding anyway): {_e}', file=sys.stderr)
 
     # Atomic write via tmp + rename — no partial pages on crash.
+    # _safe_utf8 strips unpaired surrogates that would crash the write
+    # with UnicodeEncodeError on Windows (e.g. \udc8d from upstream
+    # surrogateescape decoding).
     tmp_path = wiki_path + '.tmp'
     with open(tmp_path, 'w', encoding='utf-8') as f:
-        f.write(page_content)
+        f.write(_safe_utf8(page_content, label=wiki_path))
     os.replace(tmp_path, wiki_path)
 
     # Invalidate bulk-llm-regen state for this path (0.10.24). The regen

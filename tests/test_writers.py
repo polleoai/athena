@@ -899,18 +899,27 @@ class TestCreateWikiPageOverwrite(_VaultCase):
 
     def test_overwrite_true_rewrites_existing_page(self):
         """The core refresh-wiki contract: same URL + overwrite=True →
-        the existing wiki page gets rewritten, not skipped."""
+        the existing wiki page gets rewritten, not skipped.
+
+        Note: in the current architecture, llm_result.body is NOT
+        written into the wiki page (the wiki is a synthesis stub with
+        a *Pending synthesis* placeholder until the LLM regen step
+        fills it in). The user-visible delta on refresh is in the
+        frontmatter `summary:` field, which create_wiki_page DOES
+        copy through. We assert on that to prove the rewrite happened.
+        """
         from wiki_page import create_wiki_page
         url = "https://example.com/refresh-target"
         raw_path = self._seed_raw("refresh-target", "Refresh Target", "First-pass body content.", url)
         # First create — normal flow with an llm_result (schema requires summary)
         first = create_wiki_page(
             self.vault, raw_path, url=url, source='test-seed',
-            llm_result=self._make_llm_result("Refresh Target", "First-pass body content."),
+            llm_result=self._make_llm_result("Refresh Target", "First-pass body content.",
+                                             summary="First-pass summary."),
         )
         self.assertEqual(first['status'], 'created', msg=f"unexpected: {first}")
         first_path = Path(self.vault) / first['wiki_path']
-        first_size = first_path.stat().st_size
+        self.assertIn('First-pass summary.', first_path.read_text(encoding='utf-8'))
         # Simulate a code improvement: rewrite the raw with a different body
         Path(self.vault, raw_path).write_text(
             f'---\nsource: "{url}"\ntitle: "Refresh Target"\n---\n\n'
@@ -921,27 +930,32 @@ class TestCreateWikiPageOverwrite(_VaultCase):
         bigger_body = "Second-pass body — much longer than the first.\n" + ("Padding line.\n" * 30)
         second = create_wiki_page(
             self.vault, raw_path, url=url, source='test-refresh', overwrite=True,
-            llm_result=self._make_llm_result("Refresh Target", bigger_body),
+            llm_result=self._make_llm_result("Refresh Target", bigger_body,
+                                             summary="Second-pass summary, after refresh."),
         )
         self.assertEqual(second['status'], 'created')
         # Same wiki path (filename preserved)
         self.assertEqual(second['wiki_path'], first['wiki_path'])
-        # Body changed (size delta > 0)
-        new_size = first_path.stat().st_size
-        self.assertGreater(new_size, first_size)
-        # New body content is in the rewritten page
-        self.assertIn("Second-pass body", first_path.read_text(encoding='utf-8'))
+        # Frontmatter summary changed — proves the page was rewritten, not skipped
+        new_content = first_path.read_text(encoding='utf-8')
+        self.assertIn('Second-pass summary, after refresh.', new_content)
+        self.assertNotIn('First-pass summary.', new_content)
 
     def test_overwrite_true_snapshots_to_trash(self):
         """Refresh must leave a recoverable copy in .kb-trash/ — the
-        atomic write would otherwise destroy the prior body. This is
-        the recovery contract for `kb undo`."""
+        atomic write would otherwise destroy the prior page. This is
+        the recovery contract for `kb undo`.
+
+        Asserts on the frontmatter `summary:` (which IS written into
+        the wiki page) rather than the raw body (which is not, per
+        the current synthesis-stub architecture)."""
         from wiki_page import create_wiki_page
         url = "https://example.com/snapshot-test"
         raw_path = self._seed_raw("snap", "Snap", "Original body text.", url)
         create_wiki_page(
             self.vault, raw_path, url=url, source='test-seed',
-            llm_result=self._make_llm_result("Snap", "Original body text."),
+            llm_result=self._make_llm_result("Snap", "Original body text.",
+                                             summary="Original summary."),
         )
         # Refresh
         Path(self.vault, raw_path).write_text(
@@ -950,7 +964,8 @@ class TestCreateWikiPageOverwrite(_VaultCase):
         )
         create_wiki_page(
             self.vault, raw_path, url=url, source='test-refresh', overwrite=True,
-            llm_result=self._make_llm_result("Snap", "New body text."),
+            llm_result=self._make_llm_result("Snap", "New body text.",
+                                             summary="Updated summary after refresh."),
         )
         # Find the snapshot
         trash_root = Path(self.vault) / ".kb-trash"
@@ -959,8 +974,11 @@ class TestCreateWikiPageOverwrite(_VaultCase):
         self.assertEqual(len(snapshot_dirs), 1, f"expected 1 snapshot dir, got {snapshot_dirs}")
         snapshot_files = list(snapshot_dirs[0].glob("*.md"))
         self.assertEqual(len(snapshot_files), 1)
-        # Snapshot has the ORIGINAL content
-        self.assertIn("Original body text", snapshot_files[0].read_text(encoding='utf-8'))
+        # Snapshot has the ORIGINAL frontmatter (proves it's a copy of
+        # the pre-refresh page, not the post-refresh one)
+        snapshot_text = snapshot_files[0].read_text(encoding='utf-8')
+        self.assertIn('Original summary.', snapshot_text)
+        self.assertNotIn('Updated summary after refresh.', snapshot_text)
 
     def test_overwrite_false_preserves_collision_skip(self):
         """Regression guard: without overwrite, the URL-identity check
@@ -1830,6 +1848,79 @@ class TestUnicodeTypographyNormalization(unittest.TestCase):
         body = "\U0001d5d6\U0001d5f9\U0001d5ee\U0001d602\U0001d5f1\U0001d5f2\U0001d5d5\U0001d5f9\U0001d5f2\U0001d5f2\U0001d5f1 is a flaw. More text."
         title = _derive_title_from_body(body)
         self.assertEqual(title, "ClaudeBleed is a flaw.")
+
+
+class TestSafeUtf8SurrogateSanitization(_VaultCase):
+    """1.1.0 release-pass fix: unpaired surrogates (U+D800–U+DFFF) in
+    page_content used to crash the wiki write with UnicodeEncodeError
+    on Windows. The fix replaces them with U+FFFD at write-time.
+    These tests pin the contract:
+      1. _safe_utf8 strips lone surrogates and returns a UTF-8-safe string
+      2. create_wiki_page tolerates surrogate-bearing llm_result content
+         instead of raising
+    """
+
+    def test_safe_utf8_strips_lone_surrogate(self):
+        from wiki_page import _safe_utf8
+        # \udc8d is a lone trailing surrogate (the reported Windows crash byte)
+        contaminated = f"clean prefix \udc8d clean suffix"
+        result = _safe_utf8(contaminated, label="test")
+        # Result must be encodable as UTF-8 without error
+        result.encode('utf-8')
+        # The surrogate is replaced with U+FFFD
+        self.assertIn('�', result)
+        self.assertNotIn('\udc8d', result)
+        # Clean content around it is preserved
+        self.assertIn('clean prefix', result)
+        self.assertIn('clean suffix', result)
+
+    def test_safe_utf8_passes_clean_text_unchanged(self):
+        from wiki_page import _safe_utf8
+        clean = "Hello, world! 你好 — café — Émile"
+        self.assertEqual(_safe_utf8(clean, label="test"), clean)
+
+    def test_safe_utf8_handles_empty_and_none(self):
+        from wiki_page import _safe_utf8
+        self.assertEqual(_safe_utf8("", label="test"), "")
+        self.assertIsNone(_safe_utf8(None, label="test"))
+
+    def test_create_wiki_page_tolerates_surrogate_in_summary(self):
+        """The user-reported Windows crash path: llm_result.summary
+        had a lone surrogate from upstream surrogateescape decoding,
+        and the wiki page write crashed at open(..., 'w'). Now the
+        write succeeds and the surrogate is replaced with U+FFFD."""
+        from wiki_page import create_wiki_page
+        url = "https://example.com/surrogate-page"
+        raw_dir = Path(self.vault) / "raw" / "webpages" / "artifacts"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw = raw_dir / "surrogate-page.md"
+        raw.write_text(
+            f'---\nsource: "{url}"\ntitle: "Surrogate Page"\n---\n\n'
+            f'# Surrogate Page\n\nClean body.\n',
+            encoding="utf-8",
+        )
+        # Inject a lone surrogate in the summary — this is what crashes
+        # before the fix
+        contaminated_summary = f"Summary with bad byte: \udc8d here."
+        result = create_wiki_page(
+            self.vault, "raw/webpages/artifacts/surrogate-page.md",
+            url=url, source='test-surrogate',
+            llm_result={
+                'title': 'Surrogate Page',
+                'summary': contaminated_summary,
+                'tags': [],
+                'related': [],
+                'body': 'Clean body.',
+            },
+        )
+        self.assertEqual(result['status'], 'created', msg=f"unexpected: {result}")
+        wiki_text = (Path(self.vault) / result['wiki_path']).read_text(encoding='utf-8')
+        # Surrogate replaced; replacement char present
+        self.assertNotIn('\udc8d', wiki_text)
+        self.assertIn('�', wiki_text)
+        # Page contents otherwise intact
+        self.assertIn('Surrogate Page', wiki_text)
+        self.assertIn('Summary with bad byte', wiki_text)
 
 
 if __name__ == "__main__":
