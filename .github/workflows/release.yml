@@ -125,13 +125,26 @@ jobs:
           # only a Python install + `pip install pydantic`. Without this
           # copy the release zip is JS-only and the plugin ENOENTs on
           # bin/lib/wiki_page.py at first kb add.
-          cp -r .obsidian/plugins/athena/bin        bin
+          # Conditional: pre-1.0.9 tags don't have bin/ bundled in the
+          # plugin tree. Backfill builds for those tags ship JS-only.
+          if [ -d .obsidian/plugins/athena/bin ]; then
+            cp -r .obsidian/plugins/athena/bin bin
+            echo "has_bin=true" >> "$GITHUB_ENV"
+          else
+            echo "bin/ not present in this tag — shipping JS-only release"
+            echo "has_bin=false" >> "$GITHUB_ENV"
+          fi
 
       - name: Build install zip
         run: |
           mkdir -p dist
-          zip -r "dist/athena-${TAG_NAME}.zip" \
-            main.js manifest.json styles.css bin
+          if [ "$has_bin" = "true" ]; then
+            zip -r "dist/athena-${TAG_NAME}.zip" \
+              main.js manifest.json styles.css bin
+          else
+            zip -r "dist/athena-${TAG_NAME}.zip" \
+              main.js manifest.json styles.css
+          fi
 
       - name: Attest build provenance for release assets
         uses: actions/attest-build-provenance@v2
