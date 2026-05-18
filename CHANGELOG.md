@@ -2,6 +2,26 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.1.1] — 2026-05-18
+
+Release-process cleanup version. No functional or API change vs 1.1.0; this release exists to re-trigger Obsidian's Community Plugins directory automated review with the cleaned-up release-asset set.
+
+### Changed — Release assets
+
+- **Drop install zip from GitHub Releases**. Obsidian's directory only fetches `main.js`, `manifest.json`, and `styles.css`; additional release files surfaced a "Recommendation" warning on the 1.1.0 submission. The workflow no longer produces or attaches `athena-X.Y.Z.zip`. The Python backend (required for full synthesis) is still available by cloning the repo source.
+- **Drop `bin/` packaging from the workflow**. Was only consumed by the install zip. Stage-assets step is now exactly the three Obsidian-supported files.
+- **Drop the zip from `actions/attest-build-provenance` subject list**. Attestations now cover only the three supported assets.
+
+### Workflow hardening (also in 1.1.1 release window — landed before the version bump)
+
+- **CHANGELOG-extraction fallback**: when `awk` can't find a `## [X.Y.Z]` section in `CHANGELOG.md`, the workflow now emits a default release note linking to the full CHANGELOG + commit-history. Previously this exited 1 and the release was never created — caught by the 1.0.1 backfill failure.
+- **`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`** at workflow `env:` level. GitHub forces Node 24 for JavaScript actions on 2026-06-02; this opts in now and silences the deprecation warning emitted by `actions/checkout@v4`, `actions/setup-node@v4`, `actions/attest*`, and `softprops/action-gh-release@v2`.
+- **README**: removed the "Pushing a tag to the polleoai/athena public mirror" subsection. Maintainer-only knowledge that didn't belong in the public README's "Known limitations" block.
+
+### Why this release exists
+
+Obsidian's docs ([Submit your plugin](https://docs.obsidian.md/Plugins/Releasing/Submit+your+plugin)) state that to address feedback from the automated review, the submitter must "update your repository and publish a new GitHub release with an incremented version." 1.1.0 had a passing review modulo one "Recommendation" warning about the bundled install zip. This release ships a clean automated-review surface.
+
 ## [1.1.0 — release pass] — 2026-05-18
 
 Final code review + QA pass before locking 1.1.0 as the canonical release. Three classes of issue surfaced:
