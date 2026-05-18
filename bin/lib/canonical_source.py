@@ -66,6 +66,25 @@ _GITHUB_REPO_RE = re.compile(
     r'(?=$|[\s/?#"\)<>…](?!blob|tree|pull|issues|wiki|releases))',
     re.IGNORECASE,
 )
+
+# Tutorial/example placeholders that look like real repos but aren't.
+# Either path component (owner OR repo) matching one of these = placeholder.
+# Kept as a frozenset for cheap membership testing; comparison is lowercase.
+_PLACEHOLDER_TOKENS = frozenset({
+    'my-org', 'my-username', 'my-user', 'my-account', 'my-repo', 'my-project',
+    'your-org', 'your-username', 'your-user', 'your-account', 'your-repo', 'your-project',
+    'org', 'user', 'username', 'repo', 'project',
+    'orgname', 'reponame', 'projectname',
+    'example', 'example-org', 'example-repo',
+    'foo', 'bar', 'baz', 'foo-bar',
+    'placeholder', 'sample',
+})
+
+def _is_placeholder_repo(owner: str, repo: str) -> bool:
+    """True iff owner OR repo is a known tutorial/placeholder token.
+    Catches the my-org/my-repo, your-username/repo, example/example
+    family that tutorials use but aren't real fetchable URLs."""
+    return owner in _PLACEHOLDER_TOKENS or repo in _PLACEHOLDER_TOKENS
 # Direct PDF URLs hosted anywhere — the Riazi case (Terence Tao's Measure
 # Theory book on terrytao.wordpress.com) is the canonical example: not
 # arXiv, not a DOI, just a static PDF on a personal site. Capture the
@@ -162,6 +181,13 @@ def extract_canonical_urls(text: str) -> list[str]:
         repo = m.group(1).rstrip('/').rstrip('.')
         # Skip false positives like `github.com/in/`, `/about`, etc.
         if '/' not in repo or repo.count('/') != 1:
+            continue
+        # Skip tutorial/example placeholder repos — these aren't real
+        # and fetching them produces "Page not found" wiki pages that
+        # pollute the auto-discovery section. Owner OR repo containing
+        # one of these tokens is a placeholder, drop it.
+        owner, repo_name = repo.lower().split('/')
+        if _is_placeholder_repo(owner, repo_name):
             continue
         _add(f"https://github.com/{repo}")
     for m in _SUBSTACK_RE.finditer(text):
