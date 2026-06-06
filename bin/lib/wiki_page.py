@@ -226,6 +226,51 @@ def _clean_social_artifacts(body):
     return '\n'.join(clean)
 
 
+# Match `## Comments`, `## 25 Comments`, `## In this video` headings.
+# These are the section titles the Web Clipper YouTube template emits
+# around the full comment tree and the duplicated player-chapter chrome
+# block. The comments block alone often matches the transcript byte-for-
+# byte, so the LLM picks commenter quotes as "salient content" when
+# summarizing. Witnessed 2026-05-31 (Pi Agent wiki: every summary bullet
+# attributed to a commenter while the creator's description got one line).
+_YOUTUBE_NOISE_SECTION_RE = re.compile(
+    r'^##\s+(?:\d+\s+)?(?:[Cc]omments?|In this video)\s*$'
+)
+
+
+def _clean_youtube_content(body):
+    """Drop YouTube comment trees and player chrome from a Web Clipper body.
+
+    Sections stripped (every occurrence, since the Web Clipper sometimes
+    renders the page with comments expanded twice):
+      - ## Comments
+      - ## N Comments
+      - ## In this video      (chapter chrome, usually a duplicate of `## Chapters`)
+
+    A section runs from its `## ` heading until the next `## ` heading
+    (a real content section) or EOF. `### ` subsections inside the
+    skipped block (one per commenter) go with it.
+    """
+    if not body:
+        return body
+    out = []
+    skipping = False
+    for line in body.split('\n'):
+        if _YOUTUBE_NOISE_SECTION_RE.match(line):
+            skipping = True
+            continue
+        if skipping:
+            # Resume copying at the next `## ` content heading (but stay
+            # skipping if it's another noise section — common because the
+            # Web Clipper duplicates the comments block).
+            if line.startswith('## ') and not _YOUTUBE_NOISE_SECTION_RE.match(line):
+                skipping = False
+                out.append(line)
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+
 def preprocess_content(raw_text):
     """Strip Web Clipper YAML frontmatter, extract metadata, return clean body.
 
@@ -263,6 +308,17 @@ def preprocess_content(raw_text):
     # Strip LinkedIn navigation/profile junk from Web Clipper captures
     if url and 'linkedin.com' in url.lower() or 'linkedin.com' in body[:200].lower():
         body = _clean_linkedin_content(body)
+
+    # Strip YouTube comment trees + player chrome from Web Clipper captures.
+    # The Web Clipper's YouTube template grabs the full rendered page —
+    # description, transcript, AND the entire expanded comments tree. The
+    # comments block alone is comparable in size to the transcript, so the
+    # LLM picks commenter quotes as "salient content" instead of the
+    # creator's actual description. Filter here so both ingest paths
+    # (bin/kb CLI + Obsidian plugin via wiki_page.py --stdin) share one rule.
+    url_l = (url or '').lower()
+    if 'youtube.com' in url_l or 'youtu.be' in url_l:
+        body = _clean_youtube_content(body)
 
     # Strip common social media UI artifacts
     body = _clean_social_artifacts(body)
@@ -434,8 +490,41 @@ def apply_naming_convention(title, url, source_type, truncate=True):
         rf'^({_prefix_alt})(?:\s+\d{{4}})?\s*[—:]\s*',
         '', title, flags=re.IGNORECASE).strip()
 
+    # URL-shape rejection. If the residual title (after platform-prefix
+    # strip) is just a URL fragment, the upstream body-scan picked up an
+    # embedded image/link URL instead of real prose. Letting it through
+    # would produce slug-shaped garbage like 'LinkedIn: — https:media.
+    # licdn.comdmsimagev2D5622AQFS3mmaNDdvvQfeeds' after the filename
+    # sanitizer below strips slashes and colons. Fall through to a
+    # URL-derived humanized slug — same fallback build_fallback_data
+    # uses when no body candidate is found. Lint section #51 catches
+    # this class drift on existing pages.
+    if url and _URL_SHAPED_TITLE_RE.match(title):
+        try:
+            from urllib.parse import urlparse as _urlparse_fb
+            _slug_src = (_urlparse_fb(url).path.strip('/').replace('/', '-')
+                         or _urlparse_fb(url).netloc)
+            _slug_src = re.sub(r'[._-]+', ' ', _slug_src).strip()
+            if _slug_src:
+                title = _slug_src[:1].upper() + _slug_src[1:]
+        except Exception:  # noqa: BLE001
+            title = 'Untitled'
+
     _P = _n['platforms']
     if is_tweet:
+        # X.com's page <title> packs the whole tweet into
+        # '<DisplayName> on X: "<text> … https://t.co/…" / X'. The quote (or a
+        # backslash left by a mangled \") immediately after "on X:" is the
+        # signature of that chrome — strip the '<name> on X: "' prefix, the
+        # trailing '" / X', and any trailing t.co link so the title becomes the
+        # tweet's headline rather than the author.
+        # Witnessed 2026-05-26: 'elvis on X: "New research…" / X' produced the
+        # title 'X: elvis on X: \New research…' (doubled "X:" + mangled quote).
+        title = title.split('\n', 1)[0].strip()
+        title = re.sub(r'^.{0,80}?\bon X:\s*["“\\]\s*', '', title, flags=re.IGNORECASE).strip()
+        title = re.sub(r'\s*/\s*X\s*$', '', title).strip()
+        title = title.strip('"“”\\').strip()
+        title = re.sub(r'\s*https?://t\.co/\S+$', '', title).strip()
         title = re.sub(r'@\w+', '', title).strip()
         title = re.sub(r'^(Tweet|X Post)\s*[—\-:]?\s*', '', title, flags=re.IGNORECASE).strip()
         # Clean up the double-space residue from stripping `@username` in the
@@ -445,7 +534,7 @@ def apply_naming_convention(title, url, source_type, truncate=True):
         # with a neutral placeholder so the user notices and can rename. The
         # body-scan fallback in build_fallback_data should catch most of these
         # earlier via the GENERIC_TITLE_PATTERNS check, but defend in depth.
-        if re.fullmatch(r'Post by\s*on X\.?|on X', title, re.IGNORECASE):
+        if not title or re.fullmatch(r'Post by\s*on X\.?|on X', title, re.IGNORECASE):
             title = '(see post)'
         title = f"{_P['x']['prefix']}: " + title
     elif is_repo:
@@ -495,7 +584,12 @@ def apply_naming_convention(title, url, source_type, truncate=True):
     # here because it's our source-prefix separator (X: topic, GitHub:
     # repo, PDF: title). macOS/Linux/modern Windows all accept colon
     # in filenames; Obsidian's file tree and wikilinks handle it fine.
-    title = re.sub(r'[/*?"<>|]', '', title)
+    # `#^[]` ARE stripped: Obsidian forbids them in note names and parses
+    # them inside a wikilink as heading/block anchors and link delimiters,
+    # so a title like 'LinkedIn: #agenticai #aisecurity' produces the
+    # broken link [[LinkedIn: ]] + heading 'agenticai…' — unclickable.
+    # Witnessed 2026-05-28 (itsecuritypartners LinkedIn hashtag post).
+    title = re.sub(r'[/*?"<>|#^\[\]]', '', title)
     title = re.sub(r'\s+', ' ', title).strip()
     if truncate:
         # Cap from naming.filename_max_chars (default 100). Cuts at the last
@@ -524,6 +618,35 @@ _RAW_ASSET_PATH_RE = re.compile(r'(\]\()\.\./\.\./assets/')
 # commonly contains `[cs.AI]` and similar). Mirrors asset_download.IMG_RE.
 _BODY_IMG_RE = re.compile(
     r'!\[((?:[^\]]|\](?!\())*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)'
+)
+
+# Image-host URL detector — matches lines that contain a CDN image URL
+# anywhere (not just at line start). Used by build_fallback_data's body
+# scan to reject lines like '[**#tag**](url)![View image](https://media.
+# licdn.com/...)' that would otherwise become the title candidate after
+# the `[**#tag**]` start fails every prefix-skip check. Witnessed
+# 2026-05-21: two LinkedIn raws produced titles like 'LinkedIn: —
+# https:media.licdn.comdmsimagev2D5622AQFS3mmaNDdvvQfeeds' because the
+# embedded image URL survived to apply_naming_convention, which then
+# stripped slashes/colons into the slug-shaped garbage.
+_IMG_HOST_URL_RE = re.compile(
+    r'https?://(?:media\.licdn\.com/|pbs\.twimg\.com/|media\.giphy\.com/|'
+    r'i\.imgur\.com/|cdn\.substack\.com/image/|cdn\.discordapp\.com/'
+    r'attachments/|github\.com/[^/]+/[^/]+/(?:raw|blob)/[^/]+/.+\.(?:png|'
+    r'jpg|jpeg|gif|webp|svg))',
+    re.IGNORECASE,
+)
+
+# URL-shape detector for the apply_naming_convention defensive check.
+# After the platform prefix is stripped, a residual title that's just a
+# URL fragment (e.g. ' - https://media.licdn.com/...') means body-scan
+# picked something URL-like; reject and fall through to URL-derived slug.
+# Allows a leading separator (em-dash, colon, hyphen) before the URL
+# because the title-rebuild pattern is "<prefix>: <derived>" and the
+# derived part is what we're checking.
+_URL_SHAPED_TITLE_RE = re.compile(
+    r'^\s*[—\-:]?\s*https?:[/]*\S',
+    re.IGNORECASE,
 )
 
 
@@ -657,6 +780,18 @@ def build_fallback_data(raw_content, url, source_type, hint_title=None):
             trimmed = line.strip()
             if FM_PAIR_RE.match(trimmed):
                 continue  # YAML frontmatter pair — never a real title
+            # Skip lines that *contain* an image-host URL mid-line — e.g.
+            # LinkedIn hashtag rows where `[**#tag**](url)` chunks are
+            # concatenated with `![View image](https://media.licdn.com/...)`
+            # in a single line. The .startswith('![') check below catches
+            # lines that BEGIN with an image, but the concatenated-hashtag
+            # case starts with `[**` and slips past it, then the entire
+            # line (including the image URL) becomes the title candidate.
+            # Symptom: wiki titles like 'LinkedIn: — https:media.licdn.com
+            # dmsimagev2D5622AQFS3mmaNDdvvQfeeds' after apply_naming_
+            # convention strips slashes/colons from the embedded image URL.
+            if _IMG_HOST_URL_RE.search(trimmed):
+                continue
             if (len(trimmed) > 15 and not trimmed.startswith('http') and
                     not trimmed.startswith('- **') and not trimmed.startswith('![') and
                     not trimmed.startswith('See new') and not trimmed.startswith('#') and
@@ -727,7 +862,14 @@ def build_fallback_data(raw_content, url, source_type, hint_title=None):
         cleaned = re.sub(r'^[a-z][a-z0-9_]*:\s.*$', '', cleaned, flags=re.MULTILINE).strip()
         if len(cleaned) <= 30:
             continue
-        if cleaned.startswith(('http', '![', '---')):
+        if cleaned.startswith(('http', '![', '---', '<!--')):
+            # `<!--` skip: placeholder HTML comments (e.g. arcus_video's
+            # `<!-- No description available -->`, or `<!-- Transcript
+            # not available -->`) read as full sentences to the picker —
+            # length + space tests pass — and end up landing as the
+            # wiki summary. Witnessed 2026-05-31: a YouTube wiki shipped
+            # with summary = the description-placeholder comment because
+            # arcus returned no description.
             continue
         # Skip UI-chrome noise
         if UI_NOISE_RE.search(cleaned[:120]):

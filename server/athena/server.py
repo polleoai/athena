@@ -206,11 +206,14 @@ def _run_post_lint():
             return f"\n\n[lint: {line.strip()}]"
     return ""
 
-def _kb_run(command, *args):
+def _kb_run(command, *args, stdin_input=None):
     """Run a kb CLI command and return (success, stdout, stderr).
 
-    This bridges the MCP server to the existing bin/kb commands.
-    As we port commands to pure Python, this bridge gets replaced.
+    This bridges the MCP server to the existing bin/kb commands — every tool is
+    a thin shell-out so there is exactly ONE implementation per command (the
+    CLI), reachable identically from the shell or from here. `stdin_input` feeds
+    a command's stdin (used by add-content to pass large pasted text without
+    blowing up argv).
     """
     kb_path = os.path.join(_vault_root, 'bin', 'kb')
     cmd = [kb_path, command] + list(args)
@@ -221,6 +224,7 @@ def _kb_run(command, *args):
             text=True,
             cwd=_vault_root,
             timeout=120,
+            input=stdin_input,
             env={**os.environ, 'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + os.environ.get('PATH', '')}
         )
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
@@ -650,120 +654,20 @@ async def handle_tool(name, arguments):
         if not content:
             return [TextContent(type="text", text="Error: content is required")]
 
-        # URL dedup check — prevent creating duplicate pages
-        if url:
-            wiki_dir_check = os.path.join(_vault_root, 'wiki')
-            for root_d, dirs_d, files_d in os.walk(wiki_dir_check):
-                for wf in files_d:
-                    if not wf.endswith('.md'): continue
-                    wfp = os.path.join(root_d, wf)
-                    try:
-                        with open(wfp, 'r', encoding='utf-8') as f:
-                            head = f.read(2000)
-                        if url in head:
-                            existing_name = os.path.splitext(wf)[0]
-                            return [TextContent(type="text", text=f"Already in KB. Wiki page: [[{existing_name}]]")]
-                    except: pass
-
-        import time as _time
-        # Route through the canonical writer — same enforcement that
-        # _process_clip uses, so kb_add_content and Web Clipper produce
-        # structurally identical raw pages.
-        from pathlib import Path as _Path
-        sys.path.insert(0, os.path.join(_vault_root, 'bin', 'lib'))
-        from wiki_schema import write_raw_page  # type: ignore
-        try:
-            raw_path_obj = write_raw_page(
-                vault=_Path(_vault_root),
-                source_type=source_type,
-                url=url or f"local://kb_add_content/{title}",
-                title=title,
-                body=content,
-                extra_frontmatter={
-                    'clipped_via': 'kb_add_content',
-                    'clipped_at': _time.strftime('%Y-%m-%d'),
-                },
-            )
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error writing raw page: {e}")]
-        raw_path = str(raw_path_obj)
-
-        # Auto-generate tags from content keywords
-        content_lower = content.lower()
-        tag_map = {
-            'security': ['security', 'vulnerability', 'exploit', 'pentest', 'cve', 'threat'],
-            'ai-agents': ['agent', 'agentic', 'autonomous'],
-            'llm': ['llm', 'language model', 'gpt', 'claude', 'transformer'],
-            'ml': ['machine learning', 'neural network', 'training', 'gradient'],
-            'claude-code': ['claude code', 'claude-code', 'mcp server'],
-            'prompt-engineering': ['prompt', 'system prompt', 'few-shot'],
-            'memory': ['memory', 'knowledge graph', 'rag', 'retrieval'],
-            'obsidian': ['obsidian', 'vault', 'wikilink'],
-            'finance': ['finance', 'investment', 'portfolio', 'trading'],
-        }
-        auto_tags = set()
-        auto_tags.add(source_type)  # always include source type as tag
-        for tag, keywords in tag_map.items():
-            if any(kw in content_lower for kw in keywords):
-                auto_tags.add(tag)
-        tags_str = ', '.join(sorted(auto_tags))
-
-        # Find related pages via search index
-        related_pages = []
-        # Find related pages via keyword match against topic pages (fast, no model loading)
-        try:
-            import glob as _glob
-            title_words = set(re.sub(r'[^\w\s]', '', title.lower()).split()) - {'the', 'a', 'an', 'of', 'for', 'and', 'in', 'on', 'to', 'with', 'tweet'}
-            for wf in _glob.glob(os.path.join(_vault_root, 'wiki', 'topics', '*.md')):
-                topic_name = os.path.splitext(os.path.basename(wf))[0]
-                topic_words = set(topic_name.lower().split()) - {'the', 'a', 'an', 'of', 'for', 'and', 'in', 'on', 'to', 'with'}
-                if len(title_words & topic_words) >= 1:
-                    related_pages.append(topic_name)
-        except: pass
-
-        # Route through canonical wiki writer.
-        from pathlib import Path as _Path
-        from wiki_schema import write_wiki_page  # type: ignore
-
-        body = re.sub(r'^# .+$', '', content, flags=re.MULTILINE).strip()
-        summary = re.sub(r'#\s+\S+', '', body[:200]).replace('\n', ' ').strip().replace('"', "'")
-        if len(body) > 200:
-            summary = summary[:197] + '...'
-        rel_raw = os.path.relpath(raw_path, _vault_root)
-
-        body_text = f"[Source]({url})\n\n{body[:5000]}\n"
-        if auto_tags:
-            body_text += "\n## Keywords\n"
-            body_text += " · ".join(f"[[{t}]]" for t in sorted(auto_tags)) + "\n"
-
-        try:
-            wiki_path_obj = write_wiki_page(
-                vault=_Path(_vault_root),
-                source_type=source_type,
-                title=title,
-                summary=summary,
-                body=body_text,
-                tags=sorted(auto_tags),
-                related=related_pages,
-                raw_path=rel_raw,
-                url=url,
-            )
-            wiki_path = str(wiki_path_obj)
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error writing wiki page: {e}")]
-
-        # Update search index
-        try:
-            search_lib = os.path.join(_vault_root, 'bin', 'lib')
-            if search_lib not in sys.path:
-                sys.path.insert(0, search_lib)
-            from search import update_index
-            update_index(_vault_root)
-        except Exception:
-            pass
-
-        result = f"Created: {os.path.relpath(wiki_path, _vault_root)}\nRaw: {rel_raw}\nTitle: {clean_title}"
-        result += _run_post_lint()
+        # Shell out to `kb add-content` — the single, tested implementation of
+        # content ingest (dedup, raw + wiki write, auto-tags, related topics,
+        # reindex). Content goes over stdin so large pastes don't blow up argv.
+        ok, stdout, stderr = _kb_run(
+            "add-content",
+            "--url", url,
+            "--title", title,
+            "--source-type", source_type,
+            "--content", "-",
+            stdin_input=content,
+        )
+        if not ok:
+            return [TextContent(type="text", text=stderr or stdout or "kb add-content failed")]
+        result = stdout + _run_post_lint()
         return [TextContent(type="text", text=result)]
 
     elif name == "kb_index":
@@ -917,7 +821,14 @@ async def handle_tool(name, arguments):
         deep = arguments.get("deep", False)
         focus = arguments.get("focus")
         try:
-            import sys
+            # Note: `sys` is imported at module level (line 16). DO NOT
+            # add a local `import sys` here — Python's UnboundLocalError
+            # rule treats `sys` as local for the ENTIRE dispatcher function
+            # if assigned anywhere inside it, breaking every other elif
+            # branch that references `sys.path` (e.g. kb_add_content).
+            # Witnessed 2026-05-31: kb_add_content failed with
+            # "cannot access local variable 'sys'" because of the prior
+            # local import here.
             lib_dir = os.path.join(_vault_root, 'bin', 'lib')
             if lib_dir not in sys.path:
                 sys.path.insert(0, lib_dir)
@@ -1037,6 +948,26 @@ def _parse_clip_frontmatter(filepath):
     return url, title, body
 
 
+def _clip_clipped_via(filepath):
+    """Read the clip's `clipped_via` frontmatter value (empty if absent).
+
+    Used to avoid re-promoting a deep-capture clip back into capture-deep:
+    capture-deep's output clip (clipped_via == "deep-capture") also lands in
+    clippings/ and reaches the social branch, so the promotion guard must see it.
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read(2000)
+    except (IOError, OSError):
+        return ''
+    if not text.startswith('---'):
+        return ''
+    end = text.find('\n---', 3)
+    block = text[4:end] if end != -1 else text[4:]
+    m = re.search(r'^clipped_via\s*:\s*["\']?([^"\'\n]+)', block, re.M)
+    return m.group(1).strip() if m else ''
+
+
 def _process_clip(vault_root, filepath):
     """Process a single Web Clipper file.
 
@@ -1051,6 +982,43 @@ def _process_clip(vault_root, filepath):
         return False
 
     if _is_social_url(url):
+        # Trust-but-verify: before treating this as a thin social clip, mirror
+        # process_clip's capture-deep promotion. LinkedIn carousel/document
+        # posts (e.g. a 22-page slide deck) land thin via the Web Clipper —
+        # text + author chrome, none of the lazy-loaded slides. The dedicated
+        # social path below otherwise BYPASSES promotion entirely (it writes the
+        # clip body straight to a raw), which is exactly how a document post
+        # ends up missing its slides. Run capture-deep here instead.
+        #
+        # Safety: (1) skip if the clip is already capture-deep output (else we'd
+        # loop — the deep clip also reaches this branch); (2) on capture-deep
+        # success, drop the thin trigger clip and let THIS watcher ingest the
+        # rich deep clip on its next pass — we do NOT process it inline, to
+        # avoid double-processing the same file. Any failure falls through to
+        # the existing thin-social write (something beats nothing).
+        try:
+            sys.path.insert(0, os.path.join(vault_root, 'bin', 'lib'))
+            from process_clip import (  # type: ignore
+                _should_promote_to_playwright, _run_capture_deep,
+            )
+            from url_canonical import canonicalize as _promote_canon  # type: ignore
+            from pathlib import Path as _PromotePath
+            _canonical = _promote_canon(url).url
+            _fm = {'clipped_via': _clip_clipped_via(filepath)}
+            if _should_promote_to_playwright(_canonical, _fm):
+                logger.info(f"Promoting social clip to capture-deep: {fname}")
+                _deep = _run_capture_deep(_canonical, _PromotePath(vault_root))
+                if _deep is not None:
+                    try:
+                        os.remove(filepath)  # drop thin trigger; watcher ingests the deep clip
+                    except OSError:
+                        pass
+                    logger.info(f"capture-deep replaced thin social clip {fname} (deep clip: {os.path.basename(str(_deep))})")
+                    return True
+                logger.warning(f"capture-deep failed for {fname}; using thin social write")
+        except Exception as e:
+            logger.warning(f"capture-deep promotion check failed for {fname}: {e}; continuing with social path")
+
         # Social media — extract links from clip body and follow them
         logger.info(f"Social clip detected: {fname}")
 
@@ -1187,27 +1155,44 @@ def _process_clip(vault_root, filepath):
         os.remove(filepath)
         return True
     else:
-        # Regular webpage — clip IS the raw content, route through the
-        # canonical writer so we get URL-derived slug, artifacts/ subdir,
-        # schema-validated frontmatter, and a guaranteed H1 in one shot.
-        # See bin/lib/wiki_schema.py for the rationale on centralizing this.
+        # Regular (non-social) URL — route through unified_ingest so the
+        # source_type is determined by url_detect.py (the single source
+        # of truth) rather than hardcoded to 'webpage' as it used to be.
+        #
+        # Pre-unification this branch always wrote source_type='webpage',
+        # which silently misfiled arxiv URLs into raw/webpages/ (the
+        # ExploitGym bug) — same shape as the corresponding bug in
+        # bin/lib/process_clip.py that the unified module also fixes.
+        # See ~/.claude/plans/rustling-snuggling-emerson.md for context
+        # (note: this is the Athena ingest pipeline; the Guardrail plan
+        # there is unrelated work referenced for the routing principle).
         from pathlib import Path as _Path
+        sys.path.insert(0, os.path.join(vault_root, 'bin', 'lib'))
         try:
-            sys.path.insert(0, os.path.join(vault_root, 'bin', 'lib'))
-            from wiki_schema import write_raw_page  # type: ignore
-            raw_path = str(write_raw_page(
-                vault=_Path(vault_root),
-                source_type='webpage',
+            from unified_ingest import (  # type: ignore
+                IngestInput, UnifiedIngestError, ingest,
+            )
+            result = ingest(IngestInput(
+                vault_root=_Path(vault_root),
                 url=url,
                 title=title or fname.replace('.md', ''),
                 body=body or '',
-                extra_frontmatter={
-                    'clipped_via': 'web-clipper',
-                    'clipped_at': time.strftime('%Y-%m-%d'),
-                },
+                clipped_via='web-clipper',
+                fetch_if_missing=False,  # use the clip body; don't re-fetch
             ))
+            raw_path = str(result.raw_path)
+            if result.was_re_routed:
+                logger.info(
+                    f"Routing surface: {fname} caller-hint disagreed with "
+                    f"url_detect; final source_type={result.source_type} "
+                    f"(extracted_via={result.extracted_via})"
+                )
             os.remove(filepath)
-            logger.info(f"Processed clip: {fname} → {os.path.relpath(raw_path, vault_root)}")
+            logger.info(
+                f"Processed clip: {fname} → "
+                f"{os.path.relpath(raw_path, vault_root)} "
+                f"[source_type={result.source_type}]"
+            )
 
             # Update search index
             try:
@@ -1220,9 +1205,13 @@ def _process_clip(vault_root, filepath):
                 pass
 
             return True
+        except UnifiedIngestError as e:
+            logger.error(f"Failed to process clip {fname}: {e}")
+            return False
         except (IOError, OSError, ValueError) as e:
-            # ValueError covers wiki_schema.SchemaError (subclass) — bad input
-            # rejected at write time, which is the whole point of the schema.
+            # Catch-all for filesystem + unexpected validation errors that
+            # might escape unified_ingest. ValueError covers schema errors
+            # surfaced by the underlying writers.
             logger.error(f"Failed to process clip {fname}: {e}")
             return False
 

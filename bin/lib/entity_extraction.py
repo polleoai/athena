@@ -35,9 +35,14 @@ def _load_model():
     except OSError:
         # Model not installed — try downloading
         try:
-            import subprocess, sys
+            import subprocess, sys, shutil
+            # Frozen binary: sys.executable is the kb binary, not python, so
+            # `-m spacy` would fail; resolve a real python3 on PATH.
+            py = sys.executable
+            if getattr(sys, "frozen", False) or "__compiled__" in globals():
+                py = shutil.which("python3") or shutil.which("python") or sys.executable
             subprocess.run(
-                [sys.executable, '-m', 'spacy', 'download', 'en_core_web_sm'],
+                [py, '-m', 'spacy', 'download', 'en_core_web_sm'],
                 capture_output=True, timeout=120
             )
             _nlp = spacy.load('en_core_web_sm')

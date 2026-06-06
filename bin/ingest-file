@@ -24,7 +24,6 @@ Exit codes:
 import os
 import re
 import sys
-import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -32,7 +31,8 @@ import urllib.error
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, 'lib'))
-from file_extract import detect_type, extract_text  # noqa: E402
+from url_detect import detect_type  # noqa: E402
+from arcus_file import ingest_local_file, ArcusFileError  # noqa: E402
 
 
 # source_type → raw/ subdirectory mapping. Matches the folders Athena's
@@ -49,13 +49,38 @@ _RAW_SUBDIR = {
 }
 
 
-def _slugify(s, max_len=60):
+def _slug_max_chars():
+    """Slug length cap, from naming.slug_max_chars (default 100). Mirrors
+    naming.filename_max_chars so a file slug isn't clipped tighter than the
+    wiki filename it feeds — issue #126, where a hardcoded 60 dropped the
+    meaningful tail (`...active-director` instead of `...directory-dacl-backdoors`)."""
+    try:
+        from config import naming as _naming
+        return int(_naming().get('slug_max_chars', 100))
+    except Exception:
+        return 100
+
+
+def _slugify(s, max_len=None):
     """Filename-safe slug. Same style the bash script uses for
-    consistency with existing raw files."""
+    consistency with existing raw files. Cap defaults to
+    naming.slug_max_chars; when truncation is needed we cut at the last
+    hyphen boundary so the tail isn't a mangled half-word (issue #126)."""
+    if max_len is None:
+        max_len = _slug_max_chars()
     s = s.lower()
     s = re.sub(r'[^a-z0-9]+', '-', s)
     s = re.sub(r'-{2,}', '-', s).strip('-')
-    return s[:max_len] or 'untitled'
+    if len(s) > max_len:
+        cut = s[:max_len]
+        dash = cut.rfind('-')
+        # Prefer a clean word boundary, but only if it keeps a reasonable
+        # amount of the slug (≥ half the cap) — otherwise a slug with one
+        # very long leading token would collapse to almost nothing.
+        if dash >= max_len // 2:
+            cut = cut[:dash]
+        s = cut.strip('-')
+    return s or 'untitled'
 
 
 DRIVE_FILE_RE = re.compile(r'drive\.google\.com/file/d/([^/]+)', re.IGNORECASE)
@@ -256,34 +281,6 @@ def _apply_acronyms(text):
     return ' '.join(_replace(t) for t in text.split(' '))
 
 
-def _write_raw(raw_md_path, *, title, source_kind, url, downloaded_file,
-               authors, text, has_text):
-    """Write the raw markdown file that wiki_page.py consumes. Format
-    mirrors the existing `kb-capture` paper branch so downstream
-    parsers don't need format-specific handling."""
-    # URL intentionally omitted — the wiki page's Source line covers
-    # it. Duplicating here would create redundant clutter in the Local
-    # Copy view.
-    today = time.strftime('%Y-%m-%d')
-    lines = [
-        f'# {title}',
-        '',
-        f'- **Authors:** {authors or "(to be filled)"}',
-        f'- **{source_kind.title()} file:** ./{os.path.basename(downloaded_file)}',
-        f'- **Clipped:** {today}',
-        f'- **Content fetched:** yes ({"full text" if has_text else "metadata only"})',
-        '',
-        '## Content',
-        '',
-    ]
-    if text:
-        lines.append(text)
-    else:
-        lines.append('<!-- Text extraction unavailable. Paste content manually or re-run capture. -->')
-    with open(raw_md_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
-
-
 def main():
     if len(sys.argv) != 2 or sys.argv[1] in ('-h', '--help'):
         print(__doc__, file=sys.stderr)
@@ -349,27 +346,34 @@ def main():
     size_kb = os.path.getsize(downloaded) // 1024
     print(f'  saved: raw/{subdir}/{slug}.{ext} ({size_kb} KB)', file=sys.stderr)
 
-    meta = extract_text(downloaded, ext)
-    # Title preference: PDF's own metadata > humanized server-provided
-    # filename (preserves case like "NIST AI 100-4") > humanized slug
-    # (lowercased, gets title-cased). Ordering matters — the server's
-    # suggested name is a better hint than a slug we derived.
-    title = (meta.get('title') or '').strip()
-    if not title:
-        original_name = info.get('filename') and os.path.splitext(info['filename'])[0]
-        title = _humanize(original_name) if original_name else _humanize(slug)
-    authors = (meta.get('authors') or '').strip()
-    text = (meta.get('text') or '').strip()
+    # Title hint: prefer the server-provided filename (preserves case like
+    # "NIST AI 100-4") over the humanized slug. arcus's extractor will use
+    # PDF metadata title if present; this hint is the fallback.
+    original_name = info.get('filename') and os.path.splitext(info['filename'])[0]
+    title_hint = _humanize(original_name) if original_name else _humanize(slug)
 
-    _write_raw(
-        raw_md, title=title, source_kind=ext.upper(), url=url,
-        downloaded_file=downloaded, authors=authors, text=text,
-        has_text=bool(text),
-    )
-    print(f'  wrote: raw/{subdir}/{slug}.md', file=sys.stderr)
+    # Extract + write raw via arcus_file adapter. Adapter wraps the local
+    # file extraction (PdfProvider for .pdf, DocsProvider for .docx/.xlsx/
+    # .pptx/.epub) and produces athena's raw .md in the legacy body layout.
+    from pathlib import Path
+    try:
+        raw_path = ingest_local_file(
+            vault=Path(vault),
+            url=url,
+            local_path=Path(downloaded),
+            source_type=st,
+            ext=ext,
+            title_hint=title_hint,
+        )
+    except ArcusFileError as e:
+        print(f'ingest-file: arcus extraction failed: {e}', file=sys.stderr)
+        sys.exit(1)
+
+    rel_raw = os.path.relpath(str(raw_path), vault)
+    print(f'  wrote: {rel_raw}', file=sys.stderr)
     # stdout = the relative raw path, so the caller can chain into
     # wiki_page.py --raw-path <...>.
-    print(f'raw/{subdir}/{slug}.md')
+    print(rel_raw)
 
 
 if __name__ == '__main__':

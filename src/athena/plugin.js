@@ -573,7 +573,13 @@ const _BROWSER_EXTRACT_JS = `
 let _pythonCmd = null;
 function pythonCmd() {
   if (_pythonCmd) return _pythonCmd;
-  if (process.platform === "win32") {
+  // ATHENA_PYTHON overrides the interpreter kb runs under. This matters when the
+  // default `python3` is older than 3.11 (the floor for arcus, which powers URL
+  // ingest): a user — or the VM net-test bootstrap — can point kb at a newer
+  // interpreter without touching the system python. Behaviour-neutral if unset.
+  if (process.env.ATHENA_PYTHON) {
+    _pythonCmd = process.env.ATHENA_PYTHON;
+  } else if (process.platform === "win32") {
     // On Windows, prefer plain `python` (the canonical install). The
     // Windows Python launcher `py.exe` accepts `-3` as an arg form but
     // we don't want the indirection — if `python` isn't on PATH, the
@@ -1605,7 +1611,13 @@ class AthenaPlugin extends Plugin {
           model: this.settings.model,
         });
     return new Promise((resolve) => {
-      const proc = spawn(kbPath, [command, ...args], {
+      // Invoke kb through the Python interpreter rather than exec-ing the
+      // script path directly: bin/kb is a Python program, and on Windows there
+      // is no shebang mechanism, so `spawn(kbPath, ...)` ENOENTs. pythonCmd()
+      // resolves `python` on Windows / `python3` on POSIX; the shebang is
+      // simply ignored when the interpreter is explicit. Behaviour-neutral on
+      // POSIX (`python3 bin/kb <cmd>` == shebang-exec of bin/kb).
+      const proc = spawn(pythonCmd(), [kbPath, command, ...args], {
         cwd: vaultPath,
         env: { ...process.env, PATH: buildEnhancedPath() },
         stdio: ["pipe", "pipe", "pipe"],
@@ -3212,7 +3224,11 @@ ${taggingRules ? `- tags: follow these tagging rules:\n${taggingRules}` : "- tag
   /** Watchdog: health check on startup + every 60s. */
   async _watchdogCheck() {
     const vaultPath = this.app.vault.adapter.basePath;
-    console.log("[athena] watchdog check");
+    // Console-spam reduction (2026-05-19): only log when the watchdog
+    // actually finds something to do. The previous "[athena] watchdog
+    // check" line per 60s tick accumulated to hundreds of log lines
+    // during a long Obsidian session with nothing meaningful between
+    // them. Restart-watcher + queue-found events still log loudly.
 
     // 1. Restart any missing clip watchers. We walk the configured dir
     //    list; any dir that's not already covered in this._clipWatchers

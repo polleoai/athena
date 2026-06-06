@@ -1,0 +1,1334 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Temp file cleanup on exit ──────────────────────────────────
+_TMPFILES=()
+_TMPDIRS=()
+_cleanup() {
+  for f in "${_TMPFILES[@]:-}"; do rm -f "$f" 2>/dev/null; done
+  for d in "${_TMPDIRS[@]:-}"; do rm -rf "$d" 2>/dev/null; done
+}
+trap _cleanup EXIT
+
+# capture — fetch and save a source to the knowledge base
+#
+# Usage:
+#   capture <url>
+#   capture <url> --desc "brief description" --keywords "k1,k2" --category "c1,c2"
+#   capture   (interactive mode — prompts for each field)
+#
+# Auto-detects source type from URL:
+#   github.com/* → repo     arxiv.org/* → paper     youtube.com/* → video
+#   youtu.be/*   → video    *.pdf       → paper     everything else → webpage
+#
+# Fetches and saves the actual content locally:
+#   - Webpages: HTML → markdown conversion, saved in raw/webpages/
+#   - Repos: full README + metadata via gh CLI, saved in raw/repos/
+#   - Papers: abstract from arxiv page + PDF download, saved in raw/papers/
+#   - Videos: page metadata + title, saved in raw/videos/
+#
+# User-provided description/keywords/category are saved as suggestions.
+# The ingest workflow independently analyzes the content and reconciles.
+
+KB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ── Helpers ──────────────────────────────────────────────────
+
+die()  { echo "error: $1" >&2; exit 1; }
+slug() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'; }
+today(){ date +%Y-%m-%d; }
+
+# ── Interpreter override ─────────────────────────────────────
+# Honor $ATHENA_PYTHON — the interpreter the kb dispatcher itself runs under —
+# so this script's embedded python3 heredocs and its arcus/yt-dlp calls use the
+# SAME Python. Critical when the system python3 is older than arcus's 3.11 floor
+# (kb's pythonCmd derives from $ATHENA_PYTHON; this keeps the capture stack on
+# the same interpreter). Behaviour-neutral when unset: bare `python3` and the
+# `yt-dlp` command, exactly as before. (Function names can't contain `-`, so
+# yt-dlp is a variable rather than a wrapper function.)
+YTDLP="yt-dlp"
+if [ -n "${ATHENA_PYTHON:-}" ]; then
+  python3() { "$ATHENA_PYTHON" "$@"; }
+  YTDLP="$ATHENA_PYTHON -m yt_dlp"
+fi
+
+detect_type() {
+  local url="$1"
+  # Strip query string for suffix matching — lots of CDN URLs tack on
+  # tokens after the filename (e.g. "report.pdf?auth=xyz").
+  local bare="${url%%\?*}"
+  case "$url" in
+    *github.com/*/*|*gist.github.com/*) echo "repo"; return ;;
+    *youtube.com/watch*|*youtu.be/*|*youtube.com/shorts/*|*youtube.com/playlist*) echo "video"; return ;;
+    *x.com/*/status/*|*twitter.com/*/status/*) echo "webpage"; return ;;
+    *arxiv.org/abs/*)  echo "paper"; return ;;
+    # Google Drive /file/d/<id>/view URLs are typically PDFs served
+    # through the Drive viewer UI. HEAD on the view URL returns HTML,
+    # so suffix/Content-Type detection would misclassify as webpage.
+    # ingest-file's downloader rewrites to the export endpoint and
+    # validates PDF magic bytes — non-PDF Drive files will fail-open.
+    *drive.google.com/file/d/*)  echo "paper"; return ;;
+  esac
+  # File-type suffixes — these route through bin/ingest-file (Python).
+  # Content-Type-based detection happens there when the URL gives no hint.
+  case "$bare" in
+    *.pdf)   echo "paper" ;;
+    *.docx|*.doc)  echo "doc" ;;
+    *.xlsx|*.xls)  echo "spreadsheet" ;;
+    *.pptx|*.ppt)  echo "slides" ;;
+    *.epub)  echo "book" ;;
+    *)       echo "webpage" ;;
+  esac
+}
+
+github_parts() {
+  echo "$1" | sed -E 's|https?://github\.com/||' | cut -d'/' -f1-2 | sed 's|/$||'
+}
+
+url_to_slug() {
+  local url="$1" type="$2"
+  case "$type" in
+    repo)
+      local parts
+      parts="$(github_parts "$url")"
+      echo "$parts" | sed 's|/|--|'
+      ;;
+    video)
+      # YouTube playlist URLs (.../playlist?list=<ID>) use a case-sensitive
+      # list ID. The webpage fallback runs IDs through slug() which lowercases
+      # them — capture the ID verbatim here to preserve case. Without this,
+      # reconstructing the URL from the slug yields a 404 (the lowercased ID
+      # doesn't match YouTube's case-sensitive lookup).
+      if [[ "$url" == *youtube.com/playlist*list=* ]]; then
+        local list_id
+        list_id=$(echo "$url" | sed -E 's/.*[?&]list=([^&]+).*/\1/')
+        echo "playlist-${list_id}"
+        return
+      fi
+      local vid_id
+      vid_id=$(echo "$url" | sed -E 's/.*[?&]v=([^&]+).*/\1/' | sed -E 's/.*youtu\.be\/([^?]+).*/\1/' | sed -E 's/.*youtube\.com\/shorts\/([^?]+).*/\1/')
+      echo "video-${vid_id}"
+      ;;
+    paper)
+      # Arxiv gets a canonical "arxiv-<id>" slug; other PDFs (NIST, IEEE,
+      # random researcher pages) get a filename-based slug. The old
+      # "sed replaces slashes" heuristic was wrong — it claimed any non-
+      # arxiv URL as "arxiv-<mangled-url>" because the sed substitution
+      # went through unchanged and fell through the != check.
+      if [[ "$url" == *arxiv.org/abs/* ]]; then
+        local paper_id
+        paper_id=$(echo "$url" | sed -E 's|.*arxiv.org/abs/||' | sed 's|/$||' | sed 's|/|-|g')
+        echo "arxiv-${paper_id}"
+      elif [[ "$url" == *drive.google.com/file/d/* ]]; then
+        # Drive URLs: basename is "view" (meaningless). Slug by file_id
+        # so re-ingest of the same URL doesn't collide with a prior one
+        # and so bash's sibling raw-path check lines up with the name
+        # ingest-file will actually write.
+        local file_id
+        file_id=$(echo "$url" | sed -E 's|.*drive\.google\.com/file/d/([^/]+)/.*|\1|' | cut -c1-16)
+        echo "drive-${file_id}"
+      else
+        slug "$(basename "${url%%\?*}" .pdf)"
+      fi
+      ;;
+    doc|spreadsheet|slides|book)
+      # These route through bin/ingest-file which derives its own slug
+      # from server-suggested filenames when available. We still emit
+      # something reasonable here for the "already exists" check upstream.
+      local bare="${url%%\?*}"
+      local base
+      base=$(basename "$bare")
+      # Strip extension for slug — extractors append it back later.
+      slug "${base%.*}"
+      ;;
+    webpage)
+      # Longer slug window (120 chars) reduces — but doesn't eliminate —
+      # slug collisions. A collision-guard downstream (see `resolve_raw_path`
+      # below) appends a numeric suffix when two different URLs produce the
+      # same slug.
+      local path
+      path=$(echo "$url" | sed -E 's|https?://||' | sed 's|/$||' | cut -c1-120)
+      slug "$path"
+      ;;
+  esac
+}
+
+# Write the user suggestions block (only if any are provided)
+write_user_suggestions() {
+  local desc="${1:-}" keywords="${2:-}" category="${3:-}"
+  if [ -n "$desc" ] || [ -n "$keywords" ] || [ -n "$category" ]; then
+    echo ""
+    echo "## User Suggestions"
+    echo ""
+    echo "<!-- These are user-provided hints. The ingest workflow will independently"
+    echo "     analyze the content and reconcile — do not blindly trust these. -->"
+    echo ""
+    if [ -n "$desc" ];     then echo "- **Description:** ${desc}"; fi
+    if [ -n "$keywords" ]; then echo "- **Keywords:** ${keywords}"; fi
+    if [ -n "$category" ]; then echo "- **Category:** ${category}"; fi
+  fi
+  return 0
+}
+
+# ── Parse Arguments ──────────────────────────────────────────
+
+URL=""
+DESC=""
+KEYWORDS=""
+CATEGORY=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --desc|--description|-d)
+      [[ $# -ge 2 ]] || die "missing value for $1"
+      DESC="$2"; shift 2 ;;
+    --keywords|--tags|-k)
+      [[ $# -ge 2 ]] || die "missing value for $1"
+      KEYWORDS="$2"; shift 2 ;;
+    --category|--cat|-c)
+      [[ $# -ge 2 ]] || die "missing value for $1"
+      CATEGORY="$2"; shift 2 ;;
+    --help|-h)
+      echo "Usage: capture <url> [--desc \"...\"] [--keywords \"k1,k2\"] [--category \"c1,c2\"]"
+      echo ""
+      echo "Options:"
+      echo "  --desc, -d       Brief description (suggestion for ingest)"
+      echo "  --keywords, -k   Comma-separated keywords (suggestion for ingest)"
+      echo "  --category, -c   Comma-separated categories (suggestion for ingest)"
+      echo "  --help, -h       Show this help"
+      echo ""
+      echo "Run without arguments for interactive mode."
+      echo ""
+      echo "User-provided metadata is saved as suggestions. The ingest workflow"
+      echo "independently analyzes the fetched content and reconciles."
+      exit 0
+      ;;
+    -*)  die "unknown option: $1" ;;
+    *)
+      if [ -z "$URL" ]; then
+        URL="$1"
+      else
+        die "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+# ── Interactive Mode ─────────────────────────────────────────
+
+if [ -z "$URL" ]; then
+  echo "╔═══════════════════════════════════════╗"
+  echo "║   Knowledge Base — Capture Source     ║"
+  echo "╚═══════════════════════════════════════╝"
+  echo ""
+  read -rp "URL: " URL
+  [ -z "$URL" ] && die "URL is required"
+  read -rp "Description (optional, suggestion): " DESC
+  read -rp "Keywords (comma-separated, optional): " KEYWORDS
+  read -rp "Category (comma-separated, optional): " CATEGORY
+  echo ""
+fi
+
+# ── URL Sanitization (markdown syntax leak prevention) ──────
+# URLs that arrive via inbox/url-new.txt or direct CLI may have markdown
+# syntax leaked from copy-paste of formatted post text:
+#   "https://lnkd.in/X**"          → trailing bold delimiters
+#   "[https://x](https://x)"       → markdown link form
+#   "(https://x)" / "<https://x>"  → bracketed forms
+# Sanitize to a clean URL before any further processing. Bug class
+# surfaced 0.10.16 (sparse interstitial pages from malformed lnkd.in URLs).
+URL=$(printf '%s' "$URL" | python3 -c '
+import re, sys
+u = sys.stdin.read().strip()
+# Strip markdown link form: [https://x](https://y) → use the parenthesized URL
+m = re.match(r"^\[(https?://[^\]]+)\]\((https?://[^)]+)\)", u)
+if m:
+    u = m.group(2)
+# Strip surrounding parens/brackets/braces/backticks/quotes/angle brackets
+u = re.sub(r"^[\[\(\{`\x27\"<]+|[\]\)\}`\x27\">]+$", "", u)
+# Strip trailing markdown emphasis (bold/italic) and punctuation
+u = re.sub(r"[\*_.,;!?…]+$", "", u)
+print(u, end="")
+' 2>/dev/null)
+[ -z "$URL" ] && die "URL is empty after sanitization"
+
+# ── URL Scheme Validation (SSRF prevention) ─────────────────
+
+case "$URL" in
+  https://*|http://*) ;;  # allowed schemes
+  *://*)
+    die "unsupported URL scheme: only http:// and https:// are allowed (got: ${URL%%://*}://)"
+    ;;
+  *)
+    die "invalid URL: missing scheme (expected http:// or https://)"
+    ;;
+esac
+
+# ── Canonicalize URL via bin/lib/url_canonical.py ───────────
+# Replaces the previous sed-based tracking-param strip + ad-hoc social
+# media query-strip. The Python module handles every host-specific case
+# (X/LinkedIn = strip all params; YouTube = keep `v=` and `list=`;
+# arxiv = strip version + collapse DOI alias; HF/GH = /blob/ → /resolve/
+# or raw). Single source of truth (Phase 3b of schema refactor).
+URL=$(KB_ROOT="$KB_ROOT" python3 -c '
+import sys, os
+sys.path.insert(0, os.path.join(os.environ["KB_ROOT"], "bin", "lib"))
+from url_canonical import canonicalize
+print(canonicalize(sys.argv[1]).url)
+' "$URL")
+
+# ── Detect & Prepare ────────────────────────────────────────
+
+ORIGINAL_URL="$URL"
+DISCOVERED_VIA=""
+
+# For tweets/social media: resolve to the actual content URL
+if [[ "$URL" == *x.com/*/status/* ]] || [[ "$URL" == *twitter.com/*/status/* ]]; then
+  echo "Resolving tweet..."
+  CLEAN_TWEET=$(echo "$URL" | sed 's/[?&]s=.*//;s/[?&]t=.*//')
+  TWEET_HTML=$(curl -s --max-time 8 "https://publish.twitter.com/oembed?url=${CLEAN_TWEET}" 2>/dev/null | sed 's/\\n/ /g' | jq -r '.html // ""' 2>/dev/null)
+  for tco in $(echo "$TWEET_HTML" | grep -oE 'https://t\.co/[a-zA-Z0-9]+' 2>/dev/null); do
+    RESOLVED=$(curl -sI --max-time 5 "$tco" 2>/dev/null | grep -i "^location:" | head -1 | sed 's/^[Ll]ocation: *//' | tr -d '\r\n')
+    case "${RESOLVED:-}" in
+      *x.com/i/article/*) ;;  # X long-form articles are real content — don't skip
+      *twitter.com/*|*x.com/*|*twimg.com/*|"") continue ;;
+      *)
+        # Re-validate scheme after resolution (prevent SSRF via redirect)
+        case "$RESOLVED" in
+          https://*|http://*) ;;
+          *) echo "  Skipping resolved URL (unsafe scheme): ${RESOLVED}"; continue ;;
+        esac
+        echo "  Resolved to: ${RESOLVED}"
+        DISCOVERED_VIA="$URL"
+        URL="$RESOLVED"
+        break
+        ;;
+    esac
+  done
+  if [ "$URL" = "$ORIGINAL_URL" ]; then
+    echo "  No external link found — capturing tweet content"
+    # Save tweet text from oembed for use as content
+    TWEET_TEXT=$(echo "$TWEET_HTML" | sed 's/<[^>]*>//g' | sed 's/&mdash;.*//' | sed 's/&amp;/\&/g' | sed 's/&lt;/</g' | sed 's/&gt;/>/g' | sed 's/  */ /g' | tr -s ' ' | head -c 2000)
+
+    # Detect oembed truncation — multiple signals:
+    # - Contains … (ellipsis) anywhere
+    # - Contains pic.twitter.com (image-only teaser)
+    # - Content < 200 chars (too short to be substantive)
+    # - Content is mostly a URL (x.com/i/article links)
+    # - Contains "x.com/i/article" (long-form article link, not actual content)
+    TWEET_TRUNCATED=false
+    if echo "$TWEET_TEXT" | grep -q '…'; then TWEET_TRUNCATED=true; fi
+    if echo "$TWEET_TEXT" | grep -q 'pic\.twitter\.com'; then TWEET_TRUNCATED=true; fi
+    if echo "$TWEET_TEXT" | grep -q 'x\.com/i/article'; then TWEET_TRUNCATED=true; fi
+    if [ "${#TWEET_TEXT}" -lt 200 ]; then TWEET_TRUNCATED=true; fi
+    # ALWAYS prefer Playwright for X tweets — oembed returns only the
+    # parent tweet text (no thread, no images, no resolved t.co links,
+    # no paragraph breaks). Every X capture this session that came from
+    # oembed-only was wrong. arcus's HtmlProvider xcom-path handles thread
+    # expansion, image extraction, t.co resolution, URL reconstruction,
+    # and paragraph break recovery in one pass (delegates to fetch_x_tweet
+    # internally — same code, now living in arcus).
+    TWEET_IMG_FILE=$(mktemp); _TMPFILES+=("$TWEET_IMG_FILE")
+    echo "  Fetching tweet via arcus (text + images + paragraph breaks)..."
+    # stdout → text; stderr (IMG: <url> lines from arcus_html) → asset URLs
+    PW_TEXT=$(python3 "${KB_ROOT}/bin/lib/arcus_html.py" \
+                --vault "$KB_ROOT" --url "$CLEAN_TWEET" \
+                --print-body 2>"$TWEET_IMG_FILE") || true
+    if [ -n "$PW_TEXT" ]; then
+      TWEET_TEXT="$PW_TEXT"
+      TWEET_IMG_COUNT=$(grep -c '^IMG: ' "$TWEET_IMG_FILE" 2>/dev/null || echo 0)
+      echo "  Captured ${#TWEET_TEXT} chars + ${TWEET_IMG_COUNT} images"
+    elif $TWEET_TRUNCATED; then
+      echo "  arcus returned no content — using oembed text"
+    else
+      echo "  arcus failed; oembed text retained"
+    fi
+  fi
+fi
+
+# LinkedIn posts: extract content via og:description meta tag
+# Auto-promote LinkedIn URLs to capture-deep when Playwright auth is set up.
+# 0.10.17: extends the process_clip-side auto-promote (0.10.14) to ALSO
+# cover the URL queue path. Without this, URLs queued via inbox/url-new.txt
+# (or pasted into Add URLs.md) bypass the rich Playwright capture and get
+# the thin curl + og:description fetch — same problem class that produced
+# the Zhaorun bait-title and Kumo URN-only-form pages.
+if [[ "$URL" == *linkedin.com/posts/* ]] || [[ "$URL" == *linkedin.com/pulse/* ]]; then
+  AUTH_MARKER="$HOME/.athena/playwright-userdata/.athena-auth-confirmed"
+  if [ -f "$AUTH_MARKER" ] && [ -z "${ATHENA_DISABLE_PLAYWRIGHT_PROMOTE:-}" ]; then
+    echo "  Auto-promoting LinkedIn URL to capture-deep (Playwright session present)..."
+    if KB_ROOT="$KB_ROOT" "$KB_ROOT/bin/kb" capture-deep "$URL"; then
+      # capture-deep wrote the clip to clippings/ — autoingest will pick
+      # it up. We're done; the regular kb-capture flow below would just
+      # produce a thin duplicate that the 0.10.13 thin-overwrite guard
+      # would refuse anyway.
+      echo "  capture-deep succeeded — exiting kb-capture (autoingest handles the clip)"
+      exit 0
+    fi
+    # capture-deep failed (network, expired session, etc.). Fall through
+    # to the curl-based fetch below — better thin than nothing.
+    echo "  capture-deep failed — falling back to curl-based fetch"
+  fi
+  echo "Resolving LinkedIn post..."
+
+  # Fetch raw HTML and extract og:description (contains full post text for public posts)
+  LI_RAW=$(curl -sL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" "$URL" 2>/dev/null || echo "")
+
+  if [ -n "$LI_RAW" ]; then
+    # Extract og:description — usually contains full post text
+    LI_TEXT=$(echo "$LI_RAW" | python3 -c "
+import sys, re, html
+content = sys.stdin.read()
+m = re.search(r'og:description.*?content=\"(.*?)\"', content, re.DOTALL)
+if m:
+    text = html.unescape(m.group(1))
+    print(text)
+" 2>/dev/null || echo "")
+
+    # Extract og:title
+    LI_TITLE=$(echo "$LI_RAW" | python3 -c "
+import sys, re, html
+content = sys.stdin.read()
+m = re.search(r'og:title.*?content=\"(.*?)\"', content)
+if m:
+    print(html.unescape(m.group(1)))
+" 2>/dev/null || echo "")
+
+    if [ -n "$LI_TEXT" ] && [ ${#LI_TEXT} -gt 50 ]; then
+      echo "  Extracted post content (${#LI_TEXT} chars)"
+
+      # Look for external links in the post text
+      FOUND_URL=""
+      FOUND_URL=$(echo "$LI_TEXT" | grep -oE 'https?://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+' | head -1 || true)
+      if [ -z "$FOUND_URL" ]; then
+        FOUND_URL=$(echo "$LI_TEXT" | grep -oE 'https?://arxiv\.org/abs/[0-9.]+' | head -1 || true)
+      fi
+      if [ -z "$FOUND_URL" ]; then
+        FOUND_URL=$(echo "$LI_TEXT" | grep -oE 'https?://(www\.)?youtube\.com/watch\?v=[a-zA-Z0-9_-]+' | head -1 || true)
+      fi
+
+      if [ -n "$FOUND_URL" ]; then
+        echo "  Found external link: ${FOUND_URL}"
+        DISCOVERED_VIA="$URL"
+        URL="$FOUND_URL"
+      else
+        # No direct link — check if post references a paper/report and try to find it
+        # Look for lnkd.in short links that might point to the original source
+        LI_SHORT_LINKS=$(echo "$LI_TEXT" | grep -oE 'https?://lnkd\.in/[a-zA-Z0-9_-]+' || true)
+
+        # Also detect paper references by keywords in the post text
+        PAPER_KEYWORDS=$(echo "$LI_TEXT" | python3 -c "
+import sys, re
+text = sys.stdin.read().lower()
+# Detect if post discusses a specific paper/report
+indicators = ['paper', 'report', 'published', 'research', 'nist', 'arxiv', 'ieee',
+              'acm', 'journal', 'whitepaper', 'white paper', 'framework']
+matches = [w for w in indicators if w in text]
+if len(matches) >= 2:
+    # Extract the likely paper title from the post
+    # Look for quoted titles, capitalized phrases, or org + topic
+    title_match = re.search(r'\"([^\"]{10,80})\"', text)
+    if not title_match:
+        title_match = re.search(r'(?:paper|report|research).*?[:\-]\s*(.{10,80}?)(?:\.|$)', text)
+    if title_match:
+        print(title_match.group(1).strip())
+    else:
+        # Use og:title as search hint
+        print('SEARCH_NEEDED')
+else:
+    print('')
+" 2>/dev/null || echo "")
+
+        PAPER_FOUND=""
+        if [ -n "$PAPER_KEYWORDS" ] && [ "$PAPER_KEYWORDS" != "" ]; then
+          echo "  Post references a paper/report — searching for original source..."
+
+          # Use the og:title or extracted keywords to search
+          SEARCH_QUERY="${LI_TITLE:-$PAPER_KEYWORDS}"
+          SEARCH_QUERY=$(echo "$SEARCH_QUERY" | sed 's/|.*//;s/ - LinkedIn$//' | head -c 80)
+
+          # Search via DuckDuckGo lite (no JS needed)
+          PAPER_FOUND=$(curl -sL -A "Mozilla/5.0" \
+            "https://lite.duckduckgo.com/lite/?q=${SEARCH_QUERY// /+}+pdf+site:nist.gov+OR+site:arxiv.org+OR+site:acm.org+OR+site:ieee.org" 2>/dev/null | \
+            python3 -c "
+import sys, re
+html = sys.stdin.read()
+# Look for PDF links from authoritative sources
+urls = re.findall(r'https?://[^\"<> ]+\.pdf', html)
+if urls:
+    print(urls[0])
+else:
+    # Look for nist.gov or arxiv.org links
+    urls = re.findall(r'https?://(?:www\.)?(?:nist\.gov|nvlpubs\.nist\.gov|arxiv\.org)[^\"<> ]+', html)
+    if urls:
+        print(urls[0])
+" 2>/dev/null || echo "")
+
+          if [ -n "$PAPER_FOUND" ]; then
+            echo "  Found original paper: ${PAPER_FOUND}"
+
+            # Download PDF if it's a PDF link
+            if [[ "$PAPER_FOUND" == *.pdf ]]; then
+              PAPER_SLUG=$(echo "$SEARCH_QUERY" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 50)
+              PDF_PATH="${RAW_PAPERS_DIR}/${PAPER_SLUG}.pdf"
+              if [ ! -f "$PDF_PATH" ]; then
+                echo "  Downloading PDF..."
+                curl -sL -o "$PDF_PATH" "$PAPER_FOUND" 2>/dev/null
+                PDF_SIZE=$(stat -f%z "$PDF_PATH" 2>/dev/null || stat --printf="%s" "$PDF_PATH" 2>/dev/null || echo "0")
+                if [ "$PDF_SIZE" -gt 1000 ]; then
+                  echo "  Downloaded: ${PDF_PATH#${KB_ROOT}/} ($(( PDF_SIZE / 1024 ))KB)"
+                else
+                  rm -f "$PDF_PATH"
+                  echo "  PDF download failed"
+                fi
+              fi
+            fi
+
+            # Also capture the paper's landing page
+            if [[ "$PAPER_FOUND" != *.pdf ]]; then
+              echo "  Will also capture paper page after this post"
+              # Store for post-capture processing
+              echo "$PAPER_FOUND" > "${KB_ROOT}/.athena/_pending_paper_url" 2>/dev/null || true
+            fi
+          fi
+        fi
+
+        # Capture the post itself regardless
+        echo "  Capturing LinkedIn post content"
+        TWEET_TEXT="$LI_TEXT"
+        if [ -n "$LI_TITLE" ]; then
+          DESC="${DESC:-$LI_TITLE}"
+        fi
+      fi
+    else
+      echo "  og:description empty — trying arcus (Playwright)..."
+      LI_PW=$(python3 "${KB_ROOT}/bin/lib/arcus_html.py" \
+                --vault "$KB_ROOT" --url "$URL" --print-body 2>/dev/null) || true
+      if [ -n "$LI_PW" ] && [ "${#LI_PW}" -gt 100 ]; then
+        echo "  arcus captured ${#LI_PW} chars"
+        TWEET_TEXT="$LI_PW"
+        if [ -n "$LI_TITLE" ]; then
+          DESC="${DESC:-$LI_TITLE}"
+        fi
+      else
+        echo "  Could not extract content (private post or login required)"
+        echo "  Tip: Use Web Clipper to capture this post from your browser"
+      fi
+    fi
+  else
+    echo "  Could not reach LinkedIn"
+  fi
+fi
+
+# Reddit posts: extract via og:description or JSON API, follow GitHub links
+if [[ "$URL" == *reddit.com/r/*/comments/* ]]; then
+  echo "Resolving Reddit post..."
+
+  # Try fetching og:description from the page
+  RD_RAW=$(curl -sL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" "$URL" 2>/dev/null || echo "")
+
+  RD_TEXT=""
+  RD_TITLE=""
+  if [ -n "$RD_RAW" ]; then
+    RD_TEXT=$(echo "$RD_RAW" | python3 -c "
+import sys, re, html
+content = sys.stdin.read()
+m = re.search(r'og:description.*?content=\"(.*?)\"', content, re.DOTALL)
+if m: print(html.unescape(m.group(1)))
+" 2>/dev/null || echo "")
+
+    RD_TITLE=$(echo "$RD_RAW" | python3 -c "
+import sys, re, html
+content = sys.stdin.read()
+m = re.search(r'og:title.*?content=\"(.*?)\"', content)
+if m: print(html.unescape(m.group(1)))
+" 2>/dev/null || echo "")
+  fi
+
+  if [ -n "$RD_TEXT" ] && [ ${#RD_TEXT} -gt 30 ]; then
+    echo "  Extracted post content (${#RD_TEXT} chars)"
+
+    # Look for GitHub links in the post
+    FOUND_URL=$(echo "$RD_TEXT" | grep -oE 'https?://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+' | head -1 || true)
+    if [ -z "$FOUND_URL" ] && [ -n "$RD_RAW" ]; then
+      # Also check the full HTML for github links
+      FOUND_URL=$(echo "$RD_RAW" | grep -oE 'https?://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+' | head -1 || true)
+    fi
+
+    if [ -n "$FOUND_URL" ]; then
+      echo "  Found GitHub link: ${FOUND_URL}"
+      DISCOVERED_VIA="$URL"
+      URL="$FOUND_URL"
+    else
+      echo "  Capturing Reddit post content"
+      TWEET_TEXT="$RD_TEXT"
+      if [ -n "$RD_TITLE" ]; then
+        DESC="${DESC:-$RD_TITLE}"
+      fi
+    fi
+  else
+    echo "  Could not extract content (Reddit CAPTCHA or private)"
+    echo "  Tip: Use Web Clipper to capture this post from your browser"
+    # Try to extract title from URL pattern
+    REDDIT_TITLE=$(echo "$URL" | sed 's|.*/comments/[^/]*/||;s|/.*||;s|_| |g')
+    if [ -n "$REDDIT_TITLE" ]; then
+      DESC="${DESC:-$REDDIT_TITLE}"
+      TWEET_TEXT="Reddit post: ${REDDIT_TITLE}. Full content not captured — Reddit blocks automated access."
+    fi
+  fi
+fi
+
+TYPE="$(detect_type "$URL")"
+SLUG="$(url_to_slug "$URL" "$TYPE")"
+DATE="$(today)"
+RAW_DIR="${KB_ROOT}/raw"
+RAW_FILE=""
+
+# Config-driven raw directories. athena.default.json is the canonical source
+# (ships with release, never edited in normal operation). athena.json is an
+# optional override — we prefer it when present, fall back to default.
+CONFIG_DEFAULT="${KB_ROOT}/bin/config/athena.default.json"
+CONFIG_OVERRIDE="${KB_ROOT}/bin/config/athena.json"
+CONFIG_FILE="$CONFIG_DEFAULT"
+if [ -f "$CONFIG_OVERRIDE" ] && jq empty "$CONFIG_OVERRIDE" 2>/dev/null; then
+  # Merge override over default via jq; use the merged result for all lookups.
+  CONFIG_FILE=$(mktemp)
+  _TMPFILES+=("$CONFIG_FILE")
+  jq -s '.[0] * .[1]' "$CONFIG_DEFAULT" "$CONFIG_OVERRIDE" > "$CONFIG_FILE"
+fi
+athena_raw_dir() {
+  local cat="$1"
+  local subdir base
+  subdir=$(jq -r '.raw.artifacts_subdir // ""' "$CONFIG_FILE")
+  base=$(jq -r ".raw.categories.${cat}.dir" "$CONFIG_FILE")
+  if [ -n "$subdir" ]; then
+    echo "${base}/${subdir}"
+  else
+    echo "$base"
+  fi
+}
+RAW_PAPERS_DIR="${KB_ROOT}/$(athena_raw_dir papers)"
+RAW_REPOS_DIR="${KB_ROOT}/$(athena_raw_dir repos)"
+RAW_WEBPAGES_DIR="${KB_ROOT}/$(athena_raw_dir webpages)"
+RAW_VIDEOS_DIR="${KB_ROOT}/$(athena_raw_dir videos)"
+RAW_IMAGES_DIR="${KB_ROOT}/$(athena_raw_dir images)"
+
+# Collision guard. Two different URLs can slugify to the same basename
+# (e.g., LinkedIn posts whose URLs share a ~120-char prefix). If the slug
+# collides with an existing raw file that has a DIFFERENT URL, find the
+# next free numbered suffix (`slug-2.md`, `slug-3.md`, ...) instead of
+# overwriting. If the URL matches, it's a legitimate re-ingest and we
+# preserve the existing behavior (the caller dies with "already exists").
+resolve_raw_path() {
+  local raw_file="$1" url="$2"
+  if [ ! -f "$raw_file" ]; then
+    echo "$raw_file"
+    return
+  fi
+  local existing_url
+  existing_url=$(grep -m1 -oE 'https?://[^[:space:]]+' "$raw_file" 2>/dev/null | head -1)
+  if [ -n "$existing_url" ] && [ "$existing_url" = "$url" ]; then
+    echo "$raw_file"   # same URL — caller handles "already exists"
+    return
+  fi
+  # Different URL → find a free numeric suffix
+  local dir base ext n candidate
+  dir=$(dirname "$raw_file")
+  base=$(basename "$raw_file")
+  ext="${base##*.}"
+  base="${base%.*}"
+  n=2
+  while [ "$n" -lt 100 ]; do
+    candidate="${dir}/${base}-${n}.${ext}"
+    if [ ! -f "$candidate" ]; then
+      echo "  ⚠ Slug collision: ${base}.${ext} is taken by a different URL;" >&2
+      echo "    using ${base}-${n}.${ext} instead." >&2
+      echo "$candidate"
+      return
+    fi
+    n=$((n + 1))
+  done
+  echo "$raw_file"  # give up — let the caller's existing check fire
+}
+
+echo "Detected type: ${TYPE}"
+echo "Slug: ${SLUG}"
+
+# ── Check URL health ─────────────────────────────────────────
+
+# Skip health check for hosts that don't respond reliably to HEAD
+# requests — social media blocks bots, and Google Drive's view URLs
+# sometimes return 000 (or very slow responses) to HEAD even when the
+# actual file download works fine via the export endpoint.
+case "$URL" in
+  *x.com/*|*twitter.com/*|*linkedin.com/*|*lnkd.in/*)
+    echo "Skipping health check (social media URL)"
+    ;;
+  *drive.google.com/*)
+    echo "Skipping health check (Drive view URL — download handled by ingest-file)"
+    ;;
+  *)
+    echo "Checking URL..."
+    # Single HEAD request — capture both status AND Content-Type so we can
+    # detect when a URL classified as 'webpage' actually serves binary
+    # content (image, PDF, octet-stream). Without this guard, kb-capture
+    # used to write the binary bytes verbatim into the raw .md and TSV
+    # title columns, producing garbled wiki filenames like
+    # 'wiki/tJ�������q.��f��.md' and unclickable URL Tracker entries.
+    # Issue #138 — pbs.twimg.com/media/...?format=png surfaced this.
+    HEAD_OUT=$(curl -sI --max-time 10 -L "$URL" 2>/dev/null)
+    HTTP_STATUS=$(printf '%s' "$HEAD_OUT" | awk 'tolower($1) ~ /^http/{code=$2} END{print code}')
+    HTTP_STATUS="${HTTP_STATUS:-000}"
+    CONTENT_TYPE=$(printf '%s' "$HEAD_OUT" | awk 'BEGIN{IGNORECASE=1} /^content-type:/{sub(/^[^:]+:[[:space:]]*/,""); sub(/[[:space:]]+$/,""); print; exit}' | tr '[:upper:]' '[:lower:]' | cut -d';' -f1 | tr -d '[:space:]\r')
+    case "$HTTP_STATUS" in
+      000) die "dead link — connection failed (timeout or DNS error): ${URL}" ;;
+      4[0-9][0-9]|5[0-9][0-9]) die "dead link — HTTP ${HTTP_STATUS}: ${URL}" ;;
+      [123][0-9][0-9]) ;; # success or redirect
+      *) die "dead link — unexpected HTTP status ${HTTP_STATUS}: ${URL}" ;;
+    esac
+    # Webpage path requires text Content-Type. Binary responses produce
+    # garbled raws + TSV titles. Route image/PDF/octet-stream cases to
+    # informative bail with the right next-step.
+    if [ "$TYPE" = "webpage" ] && [ -n "$CONTENT_TYPE" ]; then
+      case "$CONTENT_TYPE" in
+        text/*|application/xhtml*|application/xml|application/rss*|application/atom*|application/json)
+          : # text-like — proceed
+          ;;
+        image/*)
+          die "binary URL (image, ${CONTENT_TYPE}): ${URL} — Athena doesn't ingest standalone images. If you want the page that hosts this image, capture that URL instead." ;;
+        application/pdf)
+          die "binary URL (PDF, ${CONTENT_TYPE}): ${URL} — re-run with the canonical paper URL (e.g. arxiv.org/abs/<id>) so it routes through the paper handler. Direct PDF URLs go through ingest-file separately." ;;
+        application/octet-stream|application/zip|application/x-tar|application/x-gzip)
+          die "binary URL (${CONTENT_TYPE}): ${URL} — not a webpage. Use ingest-file for direct downloads of files." ;;
+        *)
+          # Unknown Content-Type — proceed but warn (some hosts send
+          # incorrect or empty types; trusting the suffix-derived TYPE
+          # is the conservative choice).
+          echo "  warning: unrecognized Content-Type '${CONTENT_TYPE}' — attempting webpage capture anyway" >&2
+          ;;
+      esac
+    fi
+    ;;
+esac
+
+# ── Fetch & Build ────────────────────────────────────────────
+
+case "$TYPE" in
+
+  # ── WEBPAGE ───────────────────────────────────────────────
+  webpage)
+    RAW_FILE="${RAW_WEBPAGES_DIR}/${SLUG}.md"
+    RAW_FILE="$(resolve_raw_path "$RAW_FILE" "$URL")"
+    [ -f "$RAW_FILE" ] && die "already exists: ${RAW_FILE}"
+
+    echo "Fetching content..."
+    CONTENT_TMP=$(mktemp); _TMPFILES+=("$CONTENT_TMP")
+    TITLE=""
+    CONTENT_OK=false
+
+    # For tweets/social media: use oembed text (arcus's xcom path supersedes the
+    # older html2md approach which couldn't parse JS-rendered tweets correctly)
+    if [ -n "${TWEET_TEXT:-}" ]; then
+      echo "$TWEET_TEXT" > "$CONTENT_TMP"
+      CONTENT_OK=true
+      # Prefer user-provided --desc. Otherwise derive a real title from the
+      # tweet body's first non-empty line (commonly **Bold opening line**
+      # acting as a de-facto title), stripping markdown markers. The literal
+      # "Tweet" is only the last-resort fallback — it caused mangled wiki
+      # filenames downstream when the orphan-raw synth saw H1=="Tweet" and
+      # body-scraped the source: line as a title substitute.
+      if [ -n "${DESC:-}" ]; then
+        TITLE="$DESC"
+      else
+        # awk … exit avoids SIGPIPE under set -o pipefail (head -1 kills
+        # the upstream pipe and fails the whole pipeline).
+        TITLE=$(printf '%s\n' "$TWEET_TEXT" | awk 'NF{print; exit}' \
+          | sed -E 's/^[#*[:space:]]+//; s/[*]+[[:space:]]*$//' \
+          | cut -c1-200)
+        TITLE="${TITLE:-Tweet}"
+      fi
+    fi
+
+    # For regular webpages: extract via arcus (html2md.mjs + Playwright fallback
+    # both live behind arcus's HtmlProvider now; one call replaces the legacy
+    # two-tier ladder).
+    if ! $CONTENT_OK; then
+      ARCUS_BODY=$(python3 "${KB_ROOT}/bin/lib/arcus_html.py" \
+                     --vault "$KB_ROOT" --url "$URL" --print-body 2>/dev/null) || true
+      if [ -n "$ARCUS_BODY" ] && [ "${#ARCUS_BODY}" -gt 50 ]; then
+        echo "$ARCUS_BODY" > "$CONTENT_TMP"
+        CONTENT_OK=true
+        echo "  arcus captured ${#ARCUS_BODY} chars"
+        # Extract title from the fetched content: first H1, or first non-empty line
+        TITLE=$(sed -n 's/^# *//p' "$CONTENT_TMP" | head -1)
+        if [ -z "$TITLE" ]; then
+          TITLE=$(sed '/^[[:space:]]*$/d' "$CONTENT_TMP" | head -1 | cut -c1-200)
+        fi
+      else
+        echo "  arcus returned insufficient content"
+      fi
+    fi
+
+    if ! $CONTENT_OK; then
+      TITLE=$(curl -sL --max-time 10 "$URL" 2>/dev/null | grep -oiE '<title[^>]*>[^<]+</title>' | head -1 | sed -E 's/<\/?title[^>]*>//gi' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      echo "<!-- Content fetch failed (requires authentication or JS rendering). -->" > "$CONTENT_TMP"
+    fi
+
+    # Last-chance fallback chain before giving up: HTML <title>, then humanized slug.
+    # Never write the literal "Untitled Page" — it's a data-integrity bug (raw H1
+    # becomes search-index anchor; "Untitled Page" silently buries the source).
+    if [ -z "${TITLE// /}" ]; then
+      TITLE=$(curl -sL --max-time 10 "$URL" 2>/dev/null \
+        | grep -oiE '<title[^>]*>[^<]+</title>' \
+        | head -1 \
+        | sed -E 's/<\/?title[^>]*>//gi' \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
+    fi
+    if [ -z "${TITLE// /}" ]; then
+      # Humanize the URL slug: drop scheme/host, split on / and -, title-case.
+      TITLE=$(echo "$URL" \
+        | sed -E 's#^https?://##; s#^www\.##; s#/$##' \
+        | sed -E 's#[/?#&=]+# #g; s#[._-]+# #g' \
+        | awk '{for(i=1;i<=NF;i++)$i=toupper(substr($i,1,1))substr($i,2); print}' \
+        | cut -c1-200)
+    fi
+    TITLE="${TITLE:-Untitled Page}"
+    CONTENT_LINES=$(wc -l < "$CONTENT_TMP" | tr -d ' ')
+    CONTENT_CHARS=$(wc -c < "$CONTENT_TMP" | tr -d ' ')
+    echo "Fetched: ${CONTENT_LINES} lines of content"
+
+    # Check if content is too thin (likely auth-blocked or truncated)
+    if [ "$CONTENT_LINES" -le 3 ] || [ "$CONTENT_CHARS" -lt 200 ]; then
+      echo "WARNING:THIN_CONTENT:${CONTENT_CHARS} chars captured. This URL likely requires authentication."
+    fi
+
+    # Auto-detect referenced packages/repos from tweet content
+    # Look for: npx <name>, npm install <name>, pip install <name>, github.com/<org>/<repo>
+    if [ -n "${TWEET_TEXT:-}" ] || [ -n "${CONTENT_TMP:-}" ]; then
+      DETECT_TEXT="${TWEET_TEXT:-$(cat "$CONTENT_TMP" 2>/dev/null)}"
+      FOUND_REPOS=""
+
+      # GitHub URLs in the content
+      for gh_url in $(echo "$DETECT_TEXT" | grep -oE 'github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+' 2>/dev/null); do
+        FOUND_REPOS="${FOUND_REPOS}https://${gh_url}\n"
+      done
+
+      # npx/npm package names → search npm for repo URL
+      for pkg in $(echo "$DETECT_TEXT" | grep -oE 'npx\s+[a-zA-Z0-9_@/-]+|npm\s+install\s+[a-zA-Z0-9_@/-]+' 2>/dev/null | sed 's/npx //;s/npm install //' | head -3); do
+        PKG_REPO=$(curl -s "https://registry.npmjs.org/${pkg}" 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    repo = d.get('repository', {})
+    url = repo.get('url', '') if isinstance(repo, dict) else str(repo)
+    url = url.replace('git+', '').replace('git://', 'https://').replace('.git', '')
+    if 'github.com' in url: print(url)
+except: pass
+" 2>/dev/null || true)
+        if [ -n "$PKG_REPO" ]; then
+          FOUND_REPOS="${FOUND_REPOS}${PKG_REPO}\n"
+        else
+          # Search GitHub directly
+          GH_REPO=$(curl -s "https://api.github.com/search/repositories?q=${pkg}&sort=stars&per_page=1" 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    items = d.get('items', [])
+    if items and items[0].get('stargazers_count', 0) > 10:
+        print(items[0]['html_url'])
+except: pass
+" 2>/dev/null || true)
+          if [ -n "$GH_REPO" ]; then
+            FOUND_REPOS="${FOUND_REPOS}${GH_REPO}\n"
+          fi
+        fi
+      done
+
+      # pip install → search PyPI for repo URL
+      for pkg in $(echo "$DETECT_TEXT" | grep -oE 'pip\s+install\s+[a-zA-Z0-9_-]+' 2>/dev/null | sed 's/pip install //' | head -3); do
+        PYPI_REPO=$(curl -s "https://pypi.org/pypi/${pkg}/json" 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    urls = d.get('info', {}).get('project_urls', {})
+    for key in ['Source', 'Repository', 'GitHub', 'Homepage']:
+        url = urls.get(key, '')
+        if 'github.com' in url: print(url); break
+except: pass
+" 2>/dev/null || true)
+        if [ -n "$PYPI_REPO" ]; then
+          FOUND_REPOS="${FOUND_REPOS}${PYPI_REPO}\n"
+        fi
+      done
+
+      # Queue discovered repos for capture
+      if [ -n "$FOUND_REPOS" ]; then
+        echo ""
+        echo "Referenced repos/packages found:"
+        echo -e "$FOUND_REPOS" | sort -u | while IFS= read -r repo_url; do
+          [ -z "$repo_url" ] && continue
+          echo "  $repo_url"
+          echo "$repo_url" >> "${KB_ROOT}/inbox/url-new.txt"
+        done
+        echo "  → Queued to inbox. Run 'kb add' to capture."
+      fi
+    fi
+
+    # X tweet image references are now embedded INSIDE the text returned
+    # by arcus's xcom path (positioned after the tweet body to match the
+    # original tweet UI). The IMG: stderr lines are kept for diagnostics
+    # but no longer need separate body-prepend handling — asset_download
+    # picks the image URLs out of the markdown directly.
+
+    # Download referenced images locally so the wiki page survives CDN
+    # rot and is not vulnerable to silent URL-takeover attacks. Soft-fails:
+    # any image that won't download keeps its original URL and is logged
+    # to inbox/asset-retry.tsv for batch retry. See bin/lib/asset_download.py.
+    if [ -s "$CONTENT_TMP" ] && [ -z "${ATHENA_SKIP_ASSETS:-}" ]; then
+      ASSET_TMP=$(mktemp); _TMPFILES+=("$ASSET_TMP")
+      if python3 "${KB_ROOT}/bin/lib/asset_download.py" \
+           --page-slug "$SLUG" --vault "$KB_ROOT" --input "$CONTENT_TMP" > "$ASSET_TMP" 2>/dev/null; then
+        if [ -s "$ASSET_TMP" ]; then
+          mv "$ASSET_TMP" "$CONTENT_TMP"
+          if [ -f "${KB_ROOT}/raw/assets/${SLUG}/_assets.json" ]; then
+            ASSET_COUNT=$(python3 -c "import json,sys; d=json.load(open('${KB_ROOT}/raw/assets/${SLUG}/_assets.json')); print(len(d.get('assets',[])))" 2>/dev/null || echo "0")
+            ASSET_FAILS=$(python3 -c "import json,sys; d=json.load(open('${KB_ROOT}/raw/assets/${SLUG}/_assets.json')); print(len(d.get('failures',[])))" 2>/dev/null || echo "0")
+            [ "$ASSET_COUNT" -gt 0 ] && echo "  Downloaded ${ASSET_COUNT} images locally${ASSET_FAILS:+ (${ASSET_FAILS} failed)}"
+          fi
+        fi
+      fi
+    fi
+
+    # Route through the canonical writer (bin/lib/wiki_schema.py). It
+    # handles slug, artifacts/ subdir, frontmatter schema, H1 insertion,
+    # and atomic write — all the invariants that scattered ad-hoc writers
+    # used to violate. We pass clipping metadata via --extra; the body
+    # we pipe in is JUST the content, no H1 or URL line (writer adds them).
+    BODY_TMP=$(mktemp); _TMPFILES+=("$BODY_TMP")
+    {
+      echo "- **Clipped:** ${DATE}"
+      echo "- **Content fetched:** yes (${CONTENT_LINES} lines)"
+      write_user_suggestions "${DESC:-}" "${KEYWORDS:-}" "${CATEGORY:-}"
+      echo ""
+      echo "## Content"
+      echo ""
+      cat "$CONTENT_TMP"
+    } > "$BODY_TMP"
+    if NEW_RAW=$(python3 "${KB_ROOT}/bin/lib/wiki_schema.py" write \
+                   --vault "$KB_ROOT" --source-type webpage \
+                   --url "$URL" --title "$TITLE" \
+                   --extra "clipped_via=kb-capture" \
+                   --extra "clipped_at=${DATE}" \
+                   --input "$BODY_TMP" 2>&1); then
+      RAW_FILE="$NEW_RAW"
+    else
+      die "wiki_schema writer failed: $NEW_RAW"
+    fi
+    rm -f "$CONTENT_TMP" "$BODY_TMP"
+    ;;
+
+  # ── REPO ──────────────────────────────────────────────────
+  repo)
+    RAW_FILE="${RAW_REPOS_DIR}/${SLUG}.md"
+    RAW_FILE="$(resolve_raw_path "$RAW_FILE" "$URL")"
+    [ -f "$RAW_FILE" ] && die "already exists: ${RAW_FILE}"
+
+    PARTS="$(github_parts "$URL")"
+
+    echo "Fetching repo metadata..."
+    META="{}"
+    if command -v gh &>/dev/null; then
+      META=$(gh repo view "$PARTS" --json name,description,stargazerCount,primaryLanguage,repositoryTopics,url,updatedAt 2>/dev/null || echo "{}")
+    fi
+
+    REPO_DESC=$(echo "$META" | jq -r '.description // ""')
+    REPO_STARS=$(echo "$META" | jq -r '.stargazerCount // "N/A"')
+    REPO_LANG=$(echo "$META" | jq -r '.primaryLanguage.name // "unknown"')
+    REPO_UPDATED=$(echo "$META" | jq -r '.updatedAt // ""' | cut -d'T' -f1)
+    REPO_TOPICS=$(echo "$META" | jq -r '(.repositoryTopics // []) | if type == "array" and length > 0 then [.[].name] | join(", ") else "none" end' 2>/dev/null)
+
+    echo "Fetching README..."
+    README_TMP=$(mktemp); _TMPFILES+=("$README_TMP")
+    README_OK=false
+    REPO_BRANCH=""
+    if command -v gh &>/dev/null; then
+      if gh api "repos/${PARTS}/readme" --jq '.content' 2>/dev/null | base64 -d > "$README_TMP" 2>/dev/null; then
+        if [ -s "$README_TMP" ]; then
+          README_OK=true
+        fi
+      fi
+      REPO_BRANCH=$(gh api "repos/${PARTS}" --jq '.default_branch' 2>/dev/null || echo "")
+    fi
+    if ! $README_OK; then
+      echo "<!-- README fetch failed. Paste README manually or run ingest workflow. -->" > "$README_TMP"
+    fi
+
+    # Rewrite relative image URLs in the README to absolute raw.githubusercontent
+    # URLs. Without this, <img src="wiki/meta/cover.gif"> in a README only
+    # resolves on github.com — the locally-stored README shows broken images.
+    if $README_OK && [ -n "$REPO_BRANCH" ]; then
+      OWNER="${PARTS%%/*}"
+      REPO_NAME="${PARTS##*/}"
+      python3 "${KB_ROOT}/bin/lib/github_readme_postprocess.py" \
+        "$OWNER" "$REPO_NAME" "$REPO_BRANCH" "$README_TMP" 2>/dev/null || true
+    fi
+
+    README_LINES=$(wc -l < "$README_TMP" | tr -d ' ')
+    echo "Fetched: README (${README_LINES} lines)"
+
+    # Route through canonical writer — see webpage block for full rationale.
+    BODY_TMP=$(mktemp); _TMPFILES+=("$BODY_TMP")
+    {
+      echo "- **Stars:** ${REPO_STARS}"
+      echo "- **Language:** ${REPO_LANG}"
+      echo "- **Topics:** ${REPO_TOPICS}"
+      echo "- **Last updated:** ${REPO_UPDATED}"
+      echo "- **Clipped:** ${DATE}"
+      echo "- **Content fetched:** yes (metadata + README)"
+      echo ""
+      echo "## Description"
+      echo ""
+      echo "${REPO_DESC:-No description available.}"
+      write_user_suggestions "${DESC:-}" "${KEYWORDS:-}" "${CATEGORY:-}"
+      echo ""
+      echo "## README"
+      echo ""
+      cat "$README_TMP"
+    } > "$BODY_TMP"
+    if NEW_RAW=$(python3 "${KB_ROOT}/bin/lib/wiki_schema.py" write \
+                   --vault "$KB_ROOT" --source-type repo \
+                   --url "$URL" --title "$PARTS" \
+                   --extra "clipped_via=kb-capture" \
+                   --extra "clipped_at=${DATE}" \
+                   --extra "stars=${REPO_STARS}" \
+                   --extra "language=${REPO_LANG}" \
+                   --input "$BODY_TMP" 2>&1); then
+      RAW_FILE="$NEW_RAW"
+    else
+      die "wiki_schema writer failed: $NEW_RAW"
+    fi
+    rm -f "$README_TMP" "$BODY_TMP"
+    ;;
+
+  # ── PAPER ─────────────────────────────────────────────────
+  paper)
+    RAW_FILE="${RAW_PAPERS_DIR}/${SLUG}.md"
+    RAW_FILE="$(resolve_raw_path "$RAW_FILE" "$URL")"
+    [ -f "$RAW_FILE" ] && die "already exists: ${RAW_FILE}"
+
+    TITLE=""
+    ABSTRACT=""
+    AUTHORS=""
+    PDF_FILE=""
+
+    # Try to fetch arxiv abstract page
+    if [[ "$URL" == *arxiv.org/abs/* ]]; then
+      echo "Fetching arxiv page..."
+      ARXIV_HTML=$(curl -sL --max-time 15 "$URL" 2>/dev/null || echo "")
+
+      if [ -n "$ARXIV_HTML" ]; then
+        TITLE=$(echo "$ARXIV_HTML" | grep -oiE '<title[^>]*>[^<]+</title>' | head -1 | sed -E 's/<\/?title[^>]*>//gi' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/^\[.*\] //')
+        # Extract abstract
+        ABSTRACT=$(echo "$ARXIV_HTML" | grep -oP '(?<=<blockquote class="abstract mathjax">)[\s\S]*?(?=</blockquote>)' 2>/dev/null | sed 's/<[^>]*>//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
+        if [ -z "$ABSTRACT" ]; then
+          ABSTRACT=$(echo "$ARXIV_HTML" | sed -n '/<blockquote class="abstract/,/<\/blockquote>/p' | sed 's/<[^>]*>//g' | sed '/^$/d' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^Abstract:$' || echo "")
+        fi
+        # Extract authors
+        AUTHORS=$(echo "$ARXIV_HTML" | grep -oP '(?<=<div class="authors">)[\s\S]*?(?=</div>)' 2>/dev/null | sed 's/<[^>]*>//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/^Authors://' | sed 's/^[[:space:]]*//' || echo "")
+      fi
+
+      # Download PDF
+      ARXIV_ID=$(echo "$URL" | sed -E 's|.*arxiv.org/abs/||' | sed 's|/$||')
+      PDF_URL="https://arxiv.org/pdf/${ARXIV_ID}.pdf"
+      PDF_FILE="${RAW_PAPERS_DIR}/${SLUG}.pdf"
+      echo "Downloading PDF..."
+      if curl -sL --max-time 30 -o "$PDF_FILE" "$PDF_URL" 2>/dev/null; then
+        # Verify it's actually a PDF
+        if file "$PDF_FILE" | grep -q PDF; then
+          PDF_SIZE=$(du -h "$PDF_FILE" | cut -f1)
+          echo "Downloaded: ${PDF_FILE#${KB_ROOT}/} (${PDF_SIZE})"
+        else
+          rm -f "$PDF_FILE"
+          PDF_FILE=""
+          echo "PDF download failed (not a valid PDF)"
+        fi
+      else
+        PDF_FILE=""
+        echo "PDF download failed"
+      fi
+    else
+      # Direct PDF URL OR a paper landing page. Delegate to
+      # bin/ingest-file which handles Content-Type detection, download,
+      # metadata extraction (pdfinfo), and full-text extraction
+      # (pdftotext). The arxiv branch above stays as-is — it has
+      # abstract-fetching logic that the generic path can't replicate.
+      if RAW_REL=$(KB_ROOT="${KB_ROOT}" "${KB_ROOT}/bin/ingest-file" "$URL"); then
+        RAW_FILE="${KB_ROOT}/${RAW_REL}"
+        echo "Saved: ${RAW_REL}"
+        exit 0
+      else
+        rc=$?
+        if [ "$rc" = 2 ]; then
+          echo "ingest-file declined; falling back to webpage flow"
+        else
+          die "Capture failed. Check the URL and try again."
+        fi
+      fi
+    fi
+
+    TITLE="${TITLE:-Untitled Paper}"
+
+    # Route through canonical writer.
+    BODY_TMP=$(mktemp); _TMPFILES+=("$BODY_TMP")
+    {
+      echo "- **Authors:** ${AUTHORS:-(to be filled)}"
+      if [ -n "$PDF_FILE" ]; then
+        echo "- **PDF:** ./${SLUG}.pdf"
+      fi
+      echo "- **Clipped:** ${DATE}"
+      echo "- **Content fetched:** yes (abstract${PDF_FILE:+ + PDF})"
+      echo ""
+      echo "## Abstract"
+      echo ""
+      if [ -n "$ABSTRACT" ]; then
+        echo "$ABSTRACT"
+      else
+        echo "<!-- Abstract fetch failed. Paste abstract here or run ingest workflow. -->"
+      fi
+      write_user_suggestions "${DESC:-}" "${KEYWORDS:-}" "${CATEGORY:-}"
+    } > "$BODY_TMP"
+    # Pass --slug so the canonical-writer-emitted .md sits next to the
+    # arxiv branch's PDF (both at raw/papers/artifacts/<SLUG>.{md,pdf}).
+    # Without this the canonical writer derives its own URL-based slug
+    # ('arxiv-org-abs-NNNN-NNNNN') that diverges from the PDF's slug
+    # ('arxiv-NNNN.NNNNN'), and _find_binary_sibling in wiki_page.py
+    # then can't locate the PDF when wiring up the Local Copy link.
+    if NEW_RAW=$(python3 "${KB_ROOT}/bin/lib/wiki_schema.py" write \
+                   --vault "$KB_ROOT" --source-type paper \
+                   --url "$URL" --title "$TITLE" \
+                   --slug "$SLUG" \
+                   --extra "clipped_via=kb-capture" \
+                   --extra "clipped_at=${DATE}" \
+                   --extra "authors=${AUTHORS:-}" \
+                   --input "$BODY_TMP" 2>&1); then
+      RAW_FILE="$NEW_RAW"
+    else
+      die "wiki_schema writer failed: $NEW_RAW"
+    fi
+    rm -f "$BODY_TMP"
+    ;;
+
+  # ── DOC / SPREADSHEET / SLIDES / BOOK (unified Python ingest) ─────
+  doc|spreadsheet|slides|book)
+    if RAW_REL=$(KB_ROOT="${KB_ROOT}" "${KB_ROOT}/bin/ingest-file" "$URL"); then
+      echo "Saved: ${RAW_REL}"
+      exit 0
+    else
+      die "Capture failed. Check the URL and try again."
+    fi
+    ;;
+
+  # ── VIDEO ─────────────────────────────────────────────────
+  video)
+    RAW_FILE="${RAW_VIDEOS_DIR}/${SLUG}.md"
+    RAW_FILE="$(resolve_raw_path "$RAW_FILE" "$URL")"
+    [ -f "$RAW_FILE" ] && die "already exists: ${RAW_FILE}"
+
+    TITLE=""
+    VID_DESC=""
+    CHANNEL=""
+    DURATION=""
+    TRANSCRIPT=""
+
+    # Helper: extract a field from yt-dlp JSON file using python3 (handles control chars that break jq)
+    yt_field() {
+      local json_file="$1" field="$2"
+      python3 -c "
+import json
+try:
+    d = json.loads(open('$json_file').read())
+    print(d.get('$field', '') or '')
+except (IOError, json.JSONDecodeError, KeyError, TypeError): print('')
+" 2>/dev/null || echo ""
+    }
+
+    if $YTDLP --version &>/dev/null; then
+      echo "Fetching video metadata via yt-dlp..."
+      YT_JSON_FILE=$(mktemp); _TMPFILES+=("$YT_JSON_FILE")
+      $YTDLP --dump-json --no-download "$URL" > "$YT_JSON_FILE" 2>/dev/null || true
+
+      # Detect if this video is part of a course/playlist
+      if [ -s "$YT_JSON_FILE" ]; then
+        PLAYLIST_URL=$(yt_field "$YT_JSON_FILE" description | grep -oE 'https?://(www\.)?youtube\.com/playlist\?list=[a-zA-Z0-9_-]+' | head -1 || true)
+        VID_TITLE=$(yt_field "$YT_JSON_FILE" title)
+        if [ -n "$PLAYLIST_URL" ] || echo "$VID_TITLE" | grep -qiE 'lecture [0-9]|episode [0-9]|part [0-9]|lesson [0-9]'; then
+          echo ""
+          echo "  *** This video appears to be part of a course ***"
+          if [ -n "$PLAYLIST_URL" ]; then
+            PLAYLIST_COUNT=$($YTDLP --flat-playlist --dump-json "$PLAYLIST_URL" 2>/dev/null | wc -l | tr -d ' ')
+            echo "  Playlist: ${PLAYLIST_URL}"
+            echo "  Total videos: ${PLAYLIST_COUNT}"
+          fi
+          echo ""
+          echo "  To capture the full course, run:"
+          echo "    In Claude Code: kb add ${PLAYLIST_URL:-<playlist URL>}"
+          echo "    Or: yt-dlp --flat-playlist --dump-json \"${PLAYLIST_URL:-<playlist URL>}\" | jq -r '.url'"
+          echo ""
+          echo "  Continuing with this single lecture for now..."
+          echo ""
+        fi
+      fi
+
+      if [ -s "$YT_JSON_FILE" ]; then
+        TITLE=$(yt_field "$YT_JSON_FILE" title)
+        CHANNEL=$(yt_field "$YT_JSON_FILE" channel)
+        VID_DESC=$(yt_field "$YT_JSON_FILE" description | head -30)
+        DURATION_SEC=$(yt_field "$YT_JSON_FILE" duration)
+        DURATION_SEC="${DURATION_SEC%%.*}"  # strip decimal
+        if [ -n "$DURATION_SEC" ] && [ "$DURATION_SEC" -gt 0 ] 2>/dev/null; then
+          DURATION="$(( DURATION_SEC / 60 ))m$(( DURATION_SEC % 60 ))s"
+        fi
+      fi
+      rm -f "$YT_JSON_FILE"
+
+      # Try arcus for single-video transcript extraction.
+      # Athena's playlist detection (above) stays in athena; arcus does the
+      # actual transcript download with paragraph reflow + rolling-caption
+      # dedup + structured frontmatter. Falls back to the inline yt-dlp +
+      # sed/awk path below if arcus is unavailable or fails (playlist URL,
+      # restricted video, NLM unauth, network error, etc.).
+      USED_ARCUS=0
+      # Capture stderr separately so yt-dlp's [download] progress chatter
+      # (which arcus's Python yt-dlp API doesn't fully suppress) doesn't
+      # contaminate the path on stdout. Only display stderr on failure.
+      ARCUS_ERR=$(mktemp); _TMPFILES+=("$ARCUS_ERR")
+      if NEW_RAW=$(python3 "${KB_ROOT}/bin/lib/arcus_video.py" \
+                    --vault "$KB_ROOT" --url "$URL" --date "$DATE" \
+                    ${DESC:+--desc "$DESC"} \
+                    ${KEYWORDS:+--keywords "$KEYWORDS"} \
+                    ${CATEGORY:+--category "$CATEGORY"} 2>"$ARCUS_ERR"); then
+        RAW_FILE="$NEW_RAW"
+        USED_ARCUS=1
+        echo "Extracted via arcus: ${RAW_FILE#${KB_ROOT}/}"
+      else
+        echo "arcus extraction failed, falling back to inline yt-dlp:"
+        cat "$ARCUS_ERR" | sed 's/^/  /'
+      fi
+      rm -f "$ARCUS_ERR"
+
+      if [ "$USED_ARCUS" -eq 0 ]; then
+        echo "Extracting transcript..."
+        SUB_TMP=$(mktemp -d); _TMPDIRS+=("$SUB_TMP")
+        if yt-dlp --write-auto-sub --sub-lang en --skip-download --sub-format vtt \
+            -o "${SUB_TMP}/sub" "$URL" 2>/dev/null; then
+          # `|| true` is load-bearing under `set -euo pipefail`: when the
+          # video has no English subs, yt-dlp produces no .vtt files and
+          # `ls` exits 1, killing the whole script via set -e BEFORE the
+          # body-build path can write a metadata-only raw. Witnessed
+          # 2026-05-31: Pi Agent (Chinese video, no en captions) silently
+          # dropped on the floor with no raw, no error message.
+          VTT_FILE=$(ls "${SUB_TMP}"/sub*.vtt 2>/dev/null | head -1 || true)
+          if [ -n "$VTT_FILE" ] && [ -s "$VTT_FILE" ]; then
+            TRANSCRIPT=$(sed '/^WEBVTT/d;/^Kind:/d;/^Language:/d;/^$/d;/-->/d;s/<[^>]*>//g' "$VTT_FILE" \
+              | awk '!seen[$0]++' \
+              | tr '\n' ' ' \
+              | sed 's/  */ /g' \
+              | fold -s -w 80)
+            TLINES=$(echo "$TRANSCRIPT" | wc -l | tr -d ' ')
+            echo "Transcript: ${TLINES} lines"
+          fi
+        fi
+        rm -rf "$SUB_TMP"
+      fi
+    else
+      USED_ARCUS=0
+      echo "Fetching video page (install yt-dlp for full transcript)..."
+      VIDEO_HTML=$(curl -sL --max-time 15 "$URL" 2>/dev/null || echo "")
+      if [ -n "$VIDEO_HTML" ]; then
+        TITLE=$(echo "$VIDEO_HTML" | grep -oiE '<title[^>]*>[^<]+</title>' | head -1 | sed -E 's/<\/?title[^>]*>//gi' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        TITLE="${TITLE% - YouTube}"
+      fi
+    fi
+
+    # If arcus extracted successfully, RAW_FILE is already written —
+    # skip the legacy body-build + wiki_schema write.
+    if [ "$USED_ARCUS" -eq 0 ]; then
+      TITLE="${TITLE:-Untitled Video}"
+      FETCHED="metadata"
+      if [ -n "$TRANSCRIPT" ]; then FETCHED="metadata + transcript"; fi
+
+      # Route through canonical writer.
+      BODY_TMP=$(mktemp); _TMPFILES+=("$BODY_TMP")
+      {
+        echo "- **Channel/Speaker:** ${CHANNEL:-(to be filled)}"
+        echo "- **Duration:** ${DURATION:-(unknown)}"
+        echo "- **Clipped:** ${DATE}"
+        echo "- **Content fetched:** ${FETCHED}"
+        echo ""
+        echo "## Description"
+        echo ""
+        if [ -n "$VID_DESC" ]; then
+          echo "$VID_DESC"
+        else
+          echo "<!-- Description not available -->"
+        fi
+        write_user_suggestions "${DESC:-}" "${KEYWORDS:-}" "${CATEGORY:-}"
+        echo ""
+        echo "## Transcript"
+        echo ""
+        if [ -n "$TRANSCRIPT" ]; then
+          echo "$TRANSCRIPT"
+        else
+          echo "<!-- Transcript not available -->"
+        fi
+      } > "$BODY_TMP"
+      if NEW_RAW=$(python3 "${KB_ROOT}/bin/lib/wiki_schema.py" write \
+                     --vault "$KB_ROOT" --source-type video \
+                     --url "$URL" --title "$TITLE" \
+                     --extra "clipped_via=kb-capture" \
+                     --extra "clipped_at=${DATE}" \
+                     --extra "channel=${CHANNEL:-}" \
+                     --extra "duration=${DURATION:-}" \
+                     --input "$BODY_TMP" 2>&1); then
+        RAW_FILE="$NEW_RAW"
+      else
+        die "wiki_schema writer failed: $NEW_RAW"
+      fi
+      rm -f "$BODY_TMP"
+    fi
+    ;;
+esac
+
+# ── Partial capture warning ──────────────────────────────────
+
+if [ -n "$RAW_FILE" ] && [ -f "$RAW_FILE" ]; then
+  _RAW_LINES=$(wc -l < "$RAW_FILE" | tr -d ' ')
+  if grep -q '<!-- Content fetch failed' "$RAW_FILE" 2>/dev/null \
+     || grep -q '<!-- README fetch failed' "$RAW_FILE" 2>/dev/null \
+     || grep -q '<!-- Abstract fetch failed' "$RAW_FILE" 2>/dev/null \
+     || [ "$_RAW_LINES" -lt 5 ]; then
+    echo ""
+    echo "WARNING: Capture is partial — content fetch failed or produced very little output."
+    echo "         The raw file is a stub/placeholder. Paste content manually or re-run capture."
+  fi
+fi
+
+# ── Output ───────────────────────────────────────────────────
+
+echo ""
+echo "Saved: ${RAW_FILE#${KB_ROOT}/}"
+[ -n "${PDF_FILE:-}" ] && echo "  PDF: ${PDF_FILE#${KB_ROOT}/}"
+
+# Track URL in url-resolved.tsv — remove old entries for this URL first
+RESOLVED_TSV="${KB_ROOT}/inbox/url-resolved.tsv"
+STATUS="captured"
+if [ -n "${CONTENT_CHARS:-}" ] && [ "${CONTENT_CHARS:-0}" -lt 200 ]; then
+  STATUS="thin"
+fi
+# Remove any previous entries for this URL (uncapturable, thin, etc.)
+if [ -f "$RESOLVED_TSV" ]; then
+  grep -v "$(echo "$ORIGINAL_URL" | sed 's/[&/]/\\&/g')" "$RESOLVED_TSV" > "${RESOLVED_TSV}.tmp" 2>/dev/null || true
+  mv "${RESOLVED_TSV}.tmp" "$RESOLVED_TSV" 2>/dev/null || true
+fi
+echo -e "${STATUS}\t${TITLE:-Untitled}\t${ORIGINAL_URL}\t$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RESOLVED_TSV" 2>/dev/null || true

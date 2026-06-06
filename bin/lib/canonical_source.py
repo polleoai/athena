@@ -56,6 +56,16 @@ _MEDIUM_RE = re.compile(
     r'https?://(?:[a-z0-9-]+\.)?medium\.com/(?:@[a-z0-9-]+/)?[a-z0-9-]+(?:-[a-f0-9]+)?',
     re.IGNORECASE,
 )
+# X / Twitter status URLs — a link-share tweet often points to ANOTHER tweet
+# that holds the real content (the Atai→Saboo case). Treat the destination
+# tweet as a discoverable canonical source so the ingest pipeline + lint
+# cross-link machinery surface and link it. Match only `<handle>/status/<id>`
+# (handles are 1–15 chars of [A-Za-z0-9_]); `i` is a reserved x.com path
+# (x.com/i/article, x.com/i/web/...), never a real handle, so exclude it.
+_X_STATUS_RE = re.compile(
+    r'https?://(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d+)',
+    re.IGNORECASE,
+)
 # GitHub repos at top level (skip deep links to /blob/, /tree/, /pull/, /issues/
 # — those are sub-pages, not the canonical repo).
 _GITHUB_REPO_RE = re.compile(
@@ -190,6 +200,11 @@ def extract_canonical_urls(text: str) -> list[str]:
         if _is_placeholder_repo(owner, repo_name):
             continue
         _add(f"https://github.com/{repo}")
+    for m in _X_STATUS_RE.finditer(text):
+        handle = m.group(1)
+        if handle.lower() == 'i':
+            continue  # reserved x.com path, not a user handle
+        _add(f"https://x.com/{handle}/status/{m.group(2)}")
     for m in _SUBSTACK_RE.finditer(text):
         _add(m.group(0))
     for m in _MEDIUM_RE.finditer(text):

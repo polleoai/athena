@@ -472,6 +472,103 @@ async function main() {
     console.error(`  Body extracted via ${extractedVia} (${body.length} chars)`);
   }
 
+  // Comment scrape. LinkedIn posts often end with "Link in comments" where
+  // the author drops github / arxiv URLs in a follow-up comment that the
+  // body extraction above misses entirely. Scroll to the comments section,
+  // expand truncated comments, then collect comment text + any URLs the
+  // comments resolve via t.co-style redirectors. The captured text is
+  // appended to body under a `## Comments` heading so process_clip's
+  // _queue_referenced_urls picks the URLs up automatically.
+  // Witnessed 2026-05-19: Niels Provos's IronCurtain v0.11.0 post ("Link
+  // in comments") whose github URL only appeared in the author's reply.
+  let commentText = "";
+  try {
+    // Scroll the comments section into view. LinkedIn renders the
+    // comments below the post; scroll until they're in the viewport.
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1500);
+    // Second pass triggers lazy-load of additional comment chunks.
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1500);
+
+    // Click "Show more comments" / "Load more replies" buttons if present.
+    // Multiple LinkedIn locales + shapes — try a small selector set.
+    const expandSelectors = [
+      'button:has-text("Show more comments")',
+      'button:has-text("Load more")',
+      'button:has-text("more replies")',
+      'button.comments-comments-list__load-more-comments-button',
+    ];
+    for (const sel of expandSelectors) {
+      try {
+        const btns = page.locator(sel);
+        const count = await btns.count();
+        // Cap at 3 clicks per shape to avoid infinite loops on
+        // pathological pages.
+        for (let i = 0; i < Math.min(count, 3); i++) {
+          try {
+            await btns.nth(i).click({ timeout: 2000 });
+            await page.waitForTimeout(800);
+          } catch { /* button vanished mid-click */ }
+        }
+      } catch { /* selector didn't match */ }
+    }
+
+    // Extract comment text. LinkedIn class names churn; try multiple
+    // shapes and concatenate everything that matches. Fall back to
+    // section-level extraction if specific selectors return nothing.
+    const commentSelectors = [
+      '.comments-comment-item',
+      '.comments-comment-entity',
+      'article.comments-comment-item',
+      '[data-test-id^="comment-"]',
+    ];
+    let chunks = [];
+    for (const sel of commentSelectors) {
+      try {
+        const locs = page.locator(sel);
+        const count = await locs.count();
+        for (let i = 0; i < Math.min(count, 50); i++) {
+          try {
+            const text = await locs.nth(i).innerText({ timeout: 1000 });
+            if (text && text.trim().length > 10) {
+              chunks.push(text.trim());
+            }
+          } catch { /* skip */ }
+        }
+        if (chunks.length > 0) break;  // first selector that yielded comments wins
+      } catch { /* try next selector */ }
+    }
+    if (chunks.length === 0) {
+      // Section-level kitchen-sink fallback — grab the whole comments
+      // container if it has any text.
+      try {
+        const sec = await page.locator('section.comments-comments-list, section[aria-label*="omment"]').first().innerText({ timeout: 2000 });
+        if (sec && sec.length > 30) {
+          chunks.push(sec);
+        }
+      } catch { /* no comments section located */ }
+    }
+    if (chunks.length > 0) {
+      // De-dupe and cap. Comments can be repetitive (multiple replies
+      // quoting the same parent); a hard cap prevents the body from
+      // ballooning if a post has hundreds of comments.
+      const seen = new Set();
+      const deduped = chunks.filter((c) => {
+        const key = c.slice(0, 80);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      commentText = deduped.slice(0, 30).join("\n\n---\n\n");
+      console.error(`  Captured ${chunks.length} comment(s) → ${commentText.length} chars`);
+    } else {
+      console.error("  No comments found / extracted");
+    }
+  } catch (e) {
+    console.error(`  Comment scrape failed: ${e.message}`);
+  }
+
   // CDP-attach mode owns the browser via the user's launched Chrome —
   // closing the context would shut THEIR Chrome down. Close only the
   // page we opened. Owned-Playwright path can close the whole context.
@@ -527,6 +624,14 @@ async function main() {
   const titleEsc = pageTitle.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const urlEsc = url.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
+  // Comment section, if scrape yielded anything. process_clip's
+  // _queue_referenced_urls scans the whole body so github/arxiv URLs
+  // in comments get queued automatically — no separate integration
+  // point needed here.
+  const commentsMd = commentText
+    ? `\n\n## Comments\n\n${commentText}\n`
+    : "";
+
   const content =
     `---\n` +
     `title: "${titleEsc}"\n` +
@@ -538,11 +643,12 @@ async function main() {
     `---\n\n` +
     `## Feed post\n\n` +
     `${body}\n\n` +
-    `${imageMd}\n`;
+    `${imageMd}\n` +
+    `${commentsMd}`;
 
   fs.writeFileSync(clipPath, content);
   console.error("");
-  console.error(`Captured ${images.size} images + ${body.length} chars body`);
+  console.error(`Captured ${images.size} images + ${body.length} chars body${commentText ? ` + ${commentText.length} chars comments` : ""}`);
   console.error(`Clip written: ${path.relative(VAULT_ROOT, clipPath)}`);
   console.error("Autoingest will pick it up within ~30s, OR run: bin/kb add");
 

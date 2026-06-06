@@ -108,17 +108,57 @@ def _normalize(text: str, max_len: int = _SLUG_MAX_LEN) -> str:
     return s
 
 
+# YouTube watch / shorts / youtu.be URLs all carry an 11-char video ID
+# that's the canonical per-video key. The bare URL path (`/watch`) is
+# identical across every video, so a path-based slug collapses every
+# YouTube capture into the same filename and silently overwrites prior
+# raws on re-capture. Match against:
+#   * youtube.com/watch?v=<ID>      (any host: www / m / music)
+#   * youtube.com/shorts/<ID>
+#   * youtu.be/<ID>
+# Playlists (`/playlist?list=…`), channel pages, etc. don't match — they
+# fall through to the host+path slug.
+_YOUTUBE_VIDEO_ID_RE = re.compile(
+    r'(?:youtube\.com/(?:watch\?(?:[^#]*&)?v=|shorts/)|youtu\.be/)([a-zA-Z0-9_-]{11})'
+)
+
+
+def _youtube_video_id(url: str) -> str | None:
+    """Extract the 11-char video ID from a YouTube watch / shorts / youtu.be URL.
+
+    Returns None for playlist URLs (no single video), channel pages, or
+    any non-YouTube URL. Callers should treat None as "not a single-video
+    YouTube URL" and continue with the default path-based slug logic.
+    """
+    if not url:
+        return None
+    m = _YOUTUBE_VIDEO_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
 def _slug_from_url(url: str) -> str:
     """Convert a canonical URL into a slug input.
 
     For social posts, includes the status ID (the only unique part).
-    For repos, includes owner/repo. For papers, the arxiv ID.
+    For repos, includes owner/repo. For papers, the arxiv ID. For
+    YouTube videos, returns `video-<vid_id>` so the slug is stable
+    across every capture path (Web Clipper, arcus, kb-capture) and
+    cannot collide on `youtube-com-watch`.
 
     Returns the normalized slug, or "" if the URL is unusable (file://,
     no path, etc.).
     """
     if not url:
         return ""
+    # YouTube watch/shorts/youtu.be: the video ID is the only stable
+    # identifier across captures. Without this branch every YouTube URL
+    # collapses to `youtube-com-watch` (the query string drops out of
+    # urlparse().path) and silently overwrites prior raws on re-capture.
+    # Witnessed 2026-05-31: three distinct YouTube wiki pages all pointed
+    # at the same raw_path after sequential Web Clipper captures.
+    vid = _youtube_video_id(url)
+    if vid:
+        return f"video-{vid}"
     canon = canonicalize(url).url
     try:
         p = urllib.parse.urlparse(canon)
@@ -252,6 +292,22 @@ if __name__ == "__main__":
          "introduction-to-measure-theory"),
         ("papers", "https://arxiv.org/abs/2405.21060v3", None,
          "arxiv-org-abs-2405-21060"),
+        # YouTube watch URL → video-<id> (NOT the colliding path-slug).
+        ("videos", "https://www.youtube.com/watch?v=WvuLxxDY37U",
+         "How I Use Claude", "video-WvuLxxDY37U"),
+        # YouTube watch URL with extra query params still extracts id only.
+        ("videos",
+         "https://www.youtube.com/watch?v=jNQXAC9IVRw&t=10s&feature=share",
+         "Me at the zoo", "video-jNQXAC9IVRw"),
+        # Short youtu.be URL.
+        ("videos", "https://youtu.be/mNsqiALIoRI", "Pi Agent",
+         "video-mNsqiALIoRI"),
+        # YouTube playlist URL — NOT a single video; keep host+path slug
+        # (url_canonical strips `www.`, so just `youtube-com-playlist`).
+        ("videos",
+         "https://www.youtube.com/playlist?list=PLABCDEFG12345",
+         None,
+         "youtube-com-playlist"),
         # Should raise: webpages requires URL, none given
         ("webpages", None, "Some Title", None),
         # Should raise: books requires title, only URL given

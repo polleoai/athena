@@ -75,8 +75,8 @@ MIME_EXT = {
 }
 
 # Markdown image pattern: ![alt](url)  — capture alt and url separately.
-# We deliberately do NOT match HTML <img> tags here; html2md.mjs already
-# converted those to markdown form.
+# We deliberately do NOT match HTML <img> tags here; arcus's html2md (run
+# inside HtmlProvider) already converted those to markdown form.
 IMG_RE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
 
 
