@@ -79,6 +79,7 @@
     "prefix_separator": ":",
     "description_separator": " — ",
     "filename_max_chars": 100,
+    "slug_max_chars": 100,
     "platforms": {
       "x":        { "pattern": "(?://|\\.)(?:x|twitter)\\.com(?:/|$)",       "prefix": "X" },
       "github":   { "pattern": "(?://|\\.)github\\.com/[^/]+/[^/]+",          "prefix": "GitHub" },

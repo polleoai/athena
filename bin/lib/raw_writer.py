@@ -46,6 +46,23 @@ class RawWriterError(ValueError):
     callers to either retry with corrected data or surface to the user."""
 
 
+class DegradedContentError(RawWriterError):
+    """Subclass for write refusals where the INCOMING content itself is the
+    problem (degraded-fetch markers, thin overwrite of a substantive raw,
+    LinkedIn interstitial).
+
+    Callers (process_clip) treat this differently from generic RawWriterError:
+    retrying with the same input is guaranteed to fail again because the data
+    on disk is deterministic. The right action is to quarantine the source
+    artifact (e.g., move the Web Clipper clip to clippings/_failed/) rather
+    than leaving it in the watchdog's retry queue.
+
+    Refusals NOT caught by this subclass (e.g., transient OSError, slug
+    derivation failure) stay as RawWriterError so callers can still retry
+    them when conditions change.
+    """
+
+
 # Map source_type → on-disk category directory under raw/
 # Mirrors config.raw_dir() but kept local so this module has no
 # dependency on shell-config helpers (test-friendliness).
@@ -66,8 +83,21 @@ def _now_iso() -> str:
 
 
 def _yaml_escape(s: str) -> str:
-    """Escape for double-quoted YAML scalar."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape for a double-quoted YAML scalar kept on ONE physical line.
+
+    Besides backslash/quote, newlines/CR/tab become escape sequences so a
+    multi-line value can't split the frontmatter across physical lines.
+    Witnessed 2026-05-26: an X.com <title> that stuffs the whole tweet in
+    ('elvis on X: "…\\n\\n…" / X') rendered a multi-line `title:` value, which
+    Obsidian's Properties parser flags as "Invalid properties".
+    """
+    return (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 
 def _format_fm_value(key: str, value: Any) -> str:
@@ -233,7 +263,7 @@ def write_raw(
     if out.exists():
         for marker in _DEGRADED_FETCH_MARKERS:
             if marker in content:
-                raise RawWriterError(
+                raise DegradedContentError(
                     f"refusing to overwrite existing raw at {out.name} with "
                     f"degraded-fetch content (matched marker: {marker!r}). "
                     f"This usually means the source URL no longer resolves "
@@ -271,7 +301,7 @@ def write_raw(
             f"queue THAT URL instead." if dest_match
             else " No destination URL recoverable from the interstitial body."
         )
-        raise RawWriterError(
+        raise DegradedContentError(
             f"refusing to write LinkedIn external-link interstitial as a "
             f"raw page (matched: {interstitial_hit!r}). The interstitial "
             f"is LinkedIn's safety warning, not real content.{dest_hint}"
@@ -290,7 +320,7 @@ def write_raw(
         try:
             existing_size = out.stat().st_size
             if existing_size > len(content) * 2:
-                raise RawWriterError(
+                raise DegradedContentError(
                     f"refusing to overwrite existing {existing_size}-byte raw "
                     f"with thin {len(content)}-byte content at {out.name} "
                     f"(likely auth-wall capture / failed fetch). To force "

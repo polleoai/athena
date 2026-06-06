@@ -35,7 +35,7 @@ import unicodedata
 from pathlib import Path
 
 from raw_parser import read_raw_frontmatter
-from raw_writer import RawWriterError, write_raw
+from raw_writer import DegradedContentError, RawWriterError, write_raw
 from url_canonical import canonicalize, source_kind, SourceKind
 
 
@@ -183,6 +183,13 @@ _BAIT_CLIP_TITLE_PATTERNS = (
     re.compile(r"^profile\s+viewers?$", re.IGNORECASE),
     re.compile(r"^post\s+impressions?$", re.IGNORECASE),
     re.compile(r"^premium:\s*\d+%\s*off$", re.IGNORECASE),
+    # Hashtag-only title — the post leads with a row of tags and the clipper
+    # grabbed that as the <title>. Carries no headline; the tags ARE the
+    # topic but make a meaningless, unclickable page name. Treat as bait so
+    # _derive_title_from_body picks up the real post text instead.
+    # Witnessed 2026-05-28: itsecuritypartners post titled
+    # '#agenticai #aisecurity #securityoperations #mdr #dfir'.
+    re.compile(r"^(?:#[\w-]+\s*)+$"),
 )
 
 
@@ -502,6 +509,56 @@ def _strip_blob_videos(body: str, source_url: str = "") -> str:
     return _BLOB_VIDEO_RE.sub(replacement, body)
 
 
+# Conservative masthead-title fallback. The Web Clipper sometimes lifts a
+# site/org masthead (e.g. "Berkeley RDI") as the page <title> while the real
+# article headline sits in a body H1. When that H1 matches the URL's slug far
+# better than the clipped title does, the title is plausibly a masthead and the
+# H1 is the real headline. Only unified_ingest's NON-bait branch calls this
+# (bait titles are handled earlier by _derive_title_from_body).
+_SLUG_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "for", "and", "in", "on", "to", "with",
+    "about", "at", "by", "from",
+})
+
+
+def _best_title_from_url_slug(title: str, body: str, url: str) -> str | None:
+    """Return a body H1 that matches the URL slug when the clipped `title`
+    looks like a masthead, else None (keep `title`).
+
+    Fires only when (a) the URL has a multi-token headline slug, (b) some body
+    H1's tokens cover most of that slug, and (c) the clipped title covers far
+    less of it — i.e. the title is plausibly the site name, not the headline.
+    Deliberately conservative so legitimate titles pass through unchanged and
+    the old↔new pipeline-equivalence tests stay green.
+    """
+    # Last meaningful path segment of the URL is the headline slug.
+    path = re.sub(r"[?#].*$", "", url).rstrip("/")
+    slug = path.rsplit("/", 1)[-1] if "/" in path else ""
+    if len(slug) < 8:
+        return None
+    slug_tokens = {t for t in re.split(r"[-_]+", slug.lower()) if t} - _SLUG_STOPWORDS
+    if len(slug_tokens) < 3:
+        return None
+
+    title_tokens = set(re.findall(r"[a-z0-9]+", title.lower()))
+    title_overlap = len(title_tokens & slug_tokens) / len(slug_tokens)
+
+    best, best_overlap = None, 0.0
+    for h1 in re.findall(r"^#\s+(.+?)\s*$", body, flags=re.MULTILINE):
+        h1 = h1.strip()
+        h1_tokens = set(re.findall(r"[a-z0-9]+", h1.lower()))
+        if not h1_tokens:
+            continue
+        overlap = len(h1_tokens & slug_tokens) / len(slug_tokens)
+        if overlap > best_overlap:
+            best, best_overlap = h1, overlap
+
+    # Strong H1↔slug match AND a clear gap over the clipped title's match.
+    if best is not None and best_overlap >= 0.6 and best_overlap - title_overlap >= 0.4:
+        return best
+    return None
+
+
 def _strip_linkedin_chrome(body: str) -> str:
     """Strip LinkedIn's logged-in chrome from a clip body.
 
@@ -621,8 +678,174 @@ def _strip_linkedin_chrome(body: str) -> str:
     return body.strip() + "\n"
 
 
+# Referenced-URL discovery patterns. Mirrors the kb-capture webpage branch
+# (lines ~813-870), narrowed to canonical patterns we can safely auto-queue
+# without external lookups. Adding npm/pip → github resolution would require
+# subprocess calls; saved for a future enhancement. The patterns here cover
+# the most common cases in LinkedIn/X comments: bare github URLs + arxiv
+# paper IDs.
+_GITHUB_URL_RE = re.compile(
+    r'https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?![A-Za-z0-9_.-])',
+    re.IGNORECASE,
+)
+_ARXIV_URL_RE = re.compile(
+    r'https?://arxiv\.org/(?:abs|pdf)/\d{4}\.\d{4,5}(?:v\d+)?(?:\.pdf)?',
+    re.IGNORECASE,
+)
+
+
+def _queue_referenced_urls(body: str, vault_root: Path) -> list[str]:
+    """Scan body for github + arxiv URLs and append any not already in the
+    vault to inbox/url-new.txt. Returns the list of URLs queued.
+
+    Idempotent at the URL level — checks inbox/url-new.txt + url-resolved.tsv
+    before queuing so re-running on the same body doesn't duplicate entries.
+
+    Used to surface "Link in comments" patterns: when LinkedIn (or anywhere)
+    captures comment text inline with the post body, the URLs in those
+    comments get queued for separate capture rather than vanishing in the
+    raw .md and never being noticed.
+    """
+    if not body:
+        return []
+
+    found = set()
+    for m in _GITHUB_URL_RE.finditer(body):
+        # Strip trailing punctuation (period, comma, paren, bracket) that
+        # frequently glues onto URLs in prose: "see github.com/foo/bar."
+        url = m.group(0).rstrip(".,;:)]")
+        # Skip GitHub category URLs (search, sponsors, marketplace, etc.)
+        # — only org/repo paths get queued.
+        path = url.split("github.com/", 1)[-1].split("/", 2)
+        if len(path) >= 2 and path[0].lower() not in {
+            "search", "sponsors", "marketplace", "topics", "trending",
+            "explore", "notifications", "settings", "pulls", "issues",
+        }:
+            found.add(url)
+    for m in _ARXIV_URL_RE.finditer(body):
+        url = m.group(0).rstrip(".,;:)]")
+        found.add(url)
+
+    if not found:
+        return []
+
+    # Filter out URLs already in url-new.txt or url-resolved.tsv so we don't
+    # re-queue captures that are pending or already done.
+    inbox_dir = vault_root / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    already_seen = set()
+    new_txt = inbox_dir / "url-new.txt"
+    if new_txt.exists():
+        try:
+            already_seen.update(
+                line.strip() for line in new_txt.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#")
+            )
+        except OSError:
+            pass
+    resolved_tsv = inbox_dir / "url-resolved.tsv"
+    if resolved_tsv.exists():
+        try:
+            for line in resolved_tsv.read_text(encoding="utf-8").splitlines():
+                # tab-separated; URL column is index 2 (status, description, source_url, ...)
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    already_seen.add(parts[2].strip())
+        except OSError:
+            pass
+
+    to_queue = [url for url in sorted(found) if url not in already_seen]
+    if not to_queue:
+        return []
+
+    try:
+        with new_txt.open("a", encoding="utf-8") as f:
+            for url in to_queue:
+                f.write(url + "\n")
+        print(
+            f"[process_clip] queued {len(to_queue)} referenced URL(s) to "
+            f"inbox/url-new.txt: {', '.join(to_queue)}",
+            file=sys.stderr,
+        )
+    except OSError as e:
+        print(f"[process_clip] could not append to inbox/url-new.txt: {e}",
+              file=sys.stderr)
+        return []
+
+    return to_queue
+
+
+def _quarantine_clip(clip: Path, vault_root: Path, cause: Exception) -> None:
+    """Move a permanently-broken clip out of the watcher's polling path.
+
+    The clip is degraded (deleted post, auth wall, interstitial, thin
+    re-capture). Retrying the same input always fails the same way — the
+    data on disk is deterministic. Moving the clip to clippings/_failed/
+    breaks the watchdog's retry loop while preserving the file for
+    forensics (witnessed 2026-05-19: LinkedIn UGC clip spun in a tight
+    loop for hours after its source post was deleted).
+
+    Best-effort: if the quarantine move itself fails, log and proceed.
+    The caller still raises ProcessClipError so the user sees the
+    underlying problem; the watchdog will keep retrying but the data
+    surface is unchanged.
+    """
+    try:
+        quarantine_dir = vault_root / "clippings" / "_failed"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        quarantine_path = quarantine_dir / clip.name
+        # Collision handling: timestamp-suffix if a same-named clip was
+        # quarantined before. Preserves both copies for forensics.
+        if quarantine_path.exists():
+            stem, ext = quarantine_path.stem, quarantine_path.suffix
+            quarantine_path = quarantine_dir / f"{stem}.{int(time.time())}{ext}"
+        clip.rename(quarantine_path)
+        print(
+            f"[process_clip] quarantined {clip.name} → clippings/_failed/ "
+            f"(degraded content; not retryable): {cause}",
+            file=sys.stderr,
+        )
+    except OSError as move_exc:
+        print(
+            f"[process_clip] quarantine move failed for {clip.name}: "
+            f"{move_exc}",
+            file=sys.stderr,
+        )
+
+
 def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
-    """Process one clip file and return the path of the written raw."""
+    """Process one clip file and return the path of the written raw.
+
+    Post-unification (commit 7183eed) this function is a thin wrapper:
+    it owns the clip-file-specific pre-processing (auto-promote LinkedIn
+    to capture-deep, warn-if-Playwright-setup-missing) + post-processing
+    (touch wiki last_updated on re-clip, quarantine on degraded content),
+    then delegates routing + body handling + write to unified_ingest.
+
+    The old in-function routing (source_kind() → _KIND_TO_CATEGORY) was
+    the ExploitGym bug surface — arxiv URLs landed in raw/webpages/
+    because _KIND_TO_CATEGORY didn't include ARXIV. unified_ingest's
+    route() consults url_detect.py which knows about all athena source
+    types, so the bug class is structurally impossible from this call
+    site forward.
+
+    Behavior preserved across the migration:
+      - LinkedIn auto-promote-to-capture-deep (recursive process_clip call)
+      - Playwright-setup-needed warning
+      - Webpage-specific chrome strip / bait title / image rewrite / URL queue
+        (now performed inside unified_ingest._handle_webpage_from_markdown_body)
+      - DegradedContentError → quarantine to clippings/_failed/
+      - Wiki last_updated touch on re-clip
+
+    Behavior changed across the migration:
+      - arxiv / github / youtube URLs (and other non-webpage source types)
+        now dispatch to the appropriate handler instead of being misfiled
+        as webpages. For paper / repo / video, the Athena Web Clipper body
+        is discarded and the URL is re-extracted via the kb-capture branch
+        for that type (PDF download for arxiv, gh CLI for github, etc.).
+        This is the *intended* behavior — kb-capture's per-type extraction
+        produces a higher-fidelity raw than a generic markdown blob.
+    """
     clip = Path(clip_path)
     if not clip.is_file():
         raise ProcessClipError(f"clip not found: {clip_path}")
@@ -637,28 +860,32 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     url = fm.get("source", "").strip() if isinstance(fm.get("source"), str) else ""
 
     if not title:
-        # Web Clipper sometimes omits title; fall back to filename stem.
+        # Athena Web Clipper sometimes omits title; fall back to filename stem.
         title = clip.stem
     if not url:
         raise ProcessClipError(
-            f"clip has no source URL: {clip.name} — Web Clipper output should "
-            f"include `source:` in frontmatter; check the extension config"
+            f"clip has no source URL: {clip.name} — Athena Web Clipper output "
+            f"should include `source:` in frontmatter; check the template config"
         )
 
     canonical = canonicalize(url).url
-    kind = source_kind(canonical)
-    category = _KIND_TO_CATEGORY.get(kind, "webpage")
 
-    # Auto-promote known-broken-via-Web-Clipper domains (LinkedIn today)
-    # to capture-deep BEFORE doing any of our own write logic. Web Clipper
-    # consistently captures LinkedIn posts in URN-only URL form with no
-    # image refs and generic titles; capture-deep against the same URL
-    # produces the rich version (full body, all carousel images, real
-    # title with author attribution).
+    # Auto-promote known-broken-via-clipper domains (LinkedIn today) to
+    # capture-deep BEFORE delegating to unified_ingest. The Athena Web
+    # Clipper consistently captures LinkedIn posts in URN-only URL form
+    # with no image refs and generic titles; capture-deep against the
+    # same URL produces the rich version (full body, all carousel images,
+    # real title with author attribution).
+    #
     # If capture-deep succeeds: we delegate to its output (recursively
     # process the new clip) AND delete the Web Clipper trigger clip.
     # If capture-deep fails: fall through to the regular Web Clipper
     # write path — better to land a thin raw than to fail entirely.
+    #
+    # This pre-step lives here (not in unified_ingest) because it's
+    # specific to clip-file inputs — it inspects fm/body shape for
+    # "thin LinkedIn" signals before deciding whether to re-fetch.
+    # unified_ingest takes whatever body the caller provides.
     if _should_promote_to_playwright(canonical, fm):
         deep_clip = _run_capture_deep(canonical, Path(vault_root))
         if deep_clip is not None:
@@ -676,7 +903,7 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
             except OSError:
                 pass  # best-effort cleanup; non-fatal
             return raw_path
-        # capture-deep failed — fall through to Web Clipper write below.
+        # capture-deep failed — fall through to the regular write below.
         # The 0.10.13 raw_writer guards (degraded-fetch markers, 2x ratio)
         # protect any existing rich raw at this URL from being clobbered.
 
@@ -686,73 +913,58 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     _warn_if_setup_needed(canonical, fm, clip.name)
 
     # Body must include the actual page content. Web Clipper concatenates
-    # everything below the frontmatter into the body — pass it through.
+    # everything below the frontmatter into the body. unified_ingest's
+    # webpage handler also checks this, but we check here too so the
+    # error message references the clip filename (more actionable).
     if not body.strip():
         raise ProcessClipError(f"clip body is empty: {clip.name}")
 
-    # Per-host chrome stripping. Today: LinkedIn only (the worst offender
-    # since logged-in chrome leaks the user's own profile + premium upsells
-    # into every raw). Add other hosts as their chrome shapes get characterized.
-    if "linkedin.com" in canonical:
-        body = _strip_linkedin_chrome(body)
-        if not body.strip():
-            raise ProcessClipError(
-                f"clip body is empty after LinkedIn chrome strip: {clip.name} "
-                f"(no `## Feed post` marker found, or post body is empty between "
-                f"feed marker and reactions section)"
-            )
+    # Delegate routing + body processing + write to unified_ingest.
+    # The legacy in-function routing (source_kind → _KIND_TO_CATEGORY)
+    # is gone; routing decisions now happen in one place across all
+    # athena ingest paths. See unified_ingest.route() for the contract.
+    #
+    # Preserve provenance: pass through the clipped_via from the source
+    # clip rather than hardcoding "web-clipper". Important for capture-
+    # deep clips (which arrive with clipped_via: "deep-capture") — losing
+    # that provenance was hiding which captures had the richer Playwright
+    # path vs. the thin Web Clipper path. 0.10.17 fix.
+    from unified_ingest import (  # lazy import — see module docstring
+        IngestInput,
+        UnifiedIngestError,
+        ingest,
+    )
 
-    # Reject collision-bait clip titles. Web Clipper extracts the page's
-    # `<title>` verbatim, but LinkedIn/X serve a chrome-stripped title for
-    # every post (e.g. "Post | LinkedIn"). Without this fallback, every
-    # raw lands with the same generic `title:` field — bad for Local Copy
-    # display + Dataview tables. Derive from body's first sentence instead.
-    # Bug surfaced 0.9.13 (Praneeta raw still showed "Post | LinkedIn").
-    if _is_bait_title(title):
-        derived = _derive_title_from_body(body)
-        if derived:
-            title = derived
-
-    # Twitter/X image-size cleanup. Always safe (no-op on bodies without
-    # pbs.twimg.com URLs). See _rewrite_twimg_images for rationale.
-    body = _rewrite_twimg_images(body)
-
-    # Strip broken <video blob:...> elements (X.com etc.) that render as
-    # empty absolute-positioned overlays. Replaces with a "Watch on
-    # source" link to the original page where the video actually plays.
-    body = _strip_blob_videos(body, source_url=canonical)
-
-    # Strip trailing `…` (U+2026) from URLs in body text. X.com (and any
-    # site that visually truncates long URLs) shows `https://github.com/
-    # owner/repo…` while the actual HREF points at the full URL. Web
-    # Clipper / Turndown often captures the display text and loses the
-    # HREF, leaving `…` in the URL. Clicking it from Obsidian then URL-
-    # encodes `…` as `%E2%80%A6` and 404s — even when the underlying
-    # path is real. Strip the `…` so the local-copy URL is clickable.
-    # If the truncation chopped real characters, the URL still 404s, but
-    # at least it lands on a normal GitHub/whatever error page the user
-    # can diagnose, not a malformed-URL browser error.
-    body = re.sub(r'(https?://[^\s]*?)…', r'\1', body)
-
+    source_clipped_via = (fm.get("clipped_via") or "web-clipper").strip()
     try:
-        # Preserve provenance: pass through the clipped_via from the
-        # source clip rather than hardcoding "web-clipper". This matters
-        # for capture-deep clips (which arrive with clipped_via:
-        # "deep-capture") — losing that provenance was hiding which
-        # captures had the richer Playwright path vs. the thin Web
-        # Clipper path. 0.10.17 fix.
-        source_clipped_via = (fm.get("clipped_via") or "web-clipper").strip()
-        raw_path = write_raw(
-            vault_root=vault_root,
-            source_type=category,
+        result = ingest(IngestInput(
+            vault_root=Path(vault_root),
             url=canonical,
             title=title,
             body=body,
-            extra={"clipped_via": source_clipped_via},
-            canonicalize_url=False,  # already done above
-        )
-    except RawWriterError as exc:
-        raise ProcessClipError(f"write failed for {clip.name}: {exc}") from exc
+            clipped_via=source_clipped_via,
+            fetch_if_missing=False,  # use the clip body; don't re-fetch
+        ))
+        raw_path = result.raw_path
+    except UnifiedIngestError as exc:
+        # Translate to ProcessClipError so callers' error-handling
+        # contract is preserved. Inspect the underlying cause so we can
+        # branch on the specific failure modes that need special handling:
+        #   - DegradedContentError → quarantine the clip (watchdog must
+        #     stop re-trying a deterministically-broken input)
+        #   - RawWriterError → straight error, no quarantine
+        #   - anything else → straight error, no quarantine
+        cause = exc.__cause__
+        if isinstance(cause, DegradedContentError):
+            _quarantine_clip(clip, Path(vault_root), cause)
+            raise ProcessClipError(
+                f"quarantined degraded clip {clip.name}: {cause}"
+            ) from exc
+        if isinstance(cause, RawWriterError):
+            raise ProcessClipError(
+                f"write failed for {clip.name}: {cause}"
+            ) from exc
+        raise ProcessClipError(str(exc)) from exc
 
     # 1.1: re-clip last_updated bump.
     # If the URL already has a wiki page (silent-dedup case), touch its

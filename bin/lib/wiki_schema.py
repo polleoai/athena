@@ -573,6 +573,14 @@ def write_wiki_stub(*, vault: Path, source_type: str, old_name: str, new_name: s
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_text(body, encoding="utf-8")
     os.replace(tmp, out)
+    # Bump mtime so Obsidian fires a fresh modify event — Dataview keys
+    # off content modify (not rename or atomic-replace) to invalidate
+    # its per-file metadata cache. Without this, the stub's old entry
+    # (pre-redirect) can linger in Dataview's index until restart, and
+    # queries that exclude `!redirect` keep returning the now-stub page
+    # under its old name. Witnessed 2026-05-21 after two LinkedIn pages
+    # were renamed and their old-name slots became stubs.
+    os.utime(out, None)
     return out
 
 

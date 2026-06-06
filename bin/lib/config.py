@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # SHA256 of the canonical bin/config/athena.default.json at release time.
 # Release checklist step: recompute via `shasum -a 256 bin/config/athena.default.json`
 # whenever the default file is intentionally updated.
-_EXPECTED_DEFAULT_SHA256 = "43aac591f902d550a81c7cdae85528a2efe1bba86cd36ee06e3a4fb706850048"
+_EXPECTED_DEFAULT_SHA256 = "5d1b63097e32820c232fd8e95f9ea77cd691d1b667627e93ccd5812e64c5bfa2"
 
 # The schema version the running code was written against. Mismatches log a
 # warning so users know the override they're merging may be stale.

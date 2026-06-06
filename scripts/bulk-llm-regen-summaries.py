@@ -37,6 +37,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `bin/lib/` carries shared helpers (preprocess_content), needed below for
+# per-source-type chrome stripping so YouTube comment trees / LinkedIn
+# sidebar junk don't bleed into the LLM-generated summary. Without this,
+# the synthesis-after-create path bypasses the in-memory clean that
+# wiki_page.create_wiki_page applies on direct ingest.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin" / "lib"))
+from wiki_page import preprocess_content  # noqa: E402
 from _athena_timeout import (  # noqa: E402
     extract_text_from_stream_json,
     resolve_timeout_seconds,
@@ -174,14 +181,19 @@ def get_raw_body(wiki_path: Path, fm: dict) -> str:
         if raw_abs.is_file():
             try:
                 raw_text = raw_abs.read_text(encoding="utf-8", errors="replace")
-                # Strip YAML frontmatter from raw
-                if raw_text.startswith("---"):
-                    end = re.search(r"\n---[\s]*\n", raw_text[3:])
-                    if end:
-                        raw_text = raw_text[end.end() + 3:].strip()
-                if len(raw_text) > MAX_BODY_CHARS:
-                    raw_text = raw_text[:MAX_BODY_CHARS] + "\n\n[... truncated for token budget ...]"
-                return raw_text
+                # Delegate frontmatter-stripping + per-source-type chrome
+                # cleaning (LinkedIn sidebar, YouTube comment trees, social
+                # UI artifacts) to the shared helper so this synthesis
+                # path applies the SAME cleaners as wiki_page.create_wiki_page.
+                # Otherwise the synthesis-after-create flow re-introduces
+                # the noise we strip on ingest — witnessed 2026-05-31 with
+                # a Jason Lee YouTube wiki whose summary quoted commenters
+                # despite the on-ingest comment-strip being in place.
+                parsed = preprocess_content(raw_text)
+                body = parsed["body"]
+                if len(body) > MAX_BODY_CHARS:
+                    body = body[:MAX_BODY_CHARS] + "\n\n[... truncated for token budget ...]"
+                return body
             except (IOError, OSError):
                 pass
     # Fallback: use wiki page body

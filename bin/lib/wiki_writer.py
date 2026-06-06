@@ -114,14 +114,31 @@ def _wikilink(s: str) -> str:
 
 
 def _safe_filename(title: str) -> str:
-    """Sanitize title for use as wiki filename. Mirrors wiki_schema's logic.
+    """Sanitize title for use as wiki filename — Obsidian uses the filename as
+    the wikilink target, so the merge/rename/refresh-wiki path that goes through
+    here must produce the same name as fresh capture for the canonical Athena
+    title shape ('Prefix: plain text').
 
-    Replaces filesystem-unsafe chars with safe equivalents while preserving
-    readability — Obsidian uses the filename as the wikilink target.
+    COLON handling mirrors wiki_page._safe_filename (issue #131): on POSIX the
+    colon is kept verbatim because Athena's 'Prefix: Title' convention is valid
+    there (and HFS+/APFS/ext4 allow it); on Windows it maps to ' —' since NTFS
+    reserves ':' for alternate data streams. Previously this function dropped the
+    colon to '-' unconditionally, so a merge produced 'Web- Foo.md' while a fresh
+    capture produced 'Web: Foo.md' — a divergence that broke wikilink resolution.
+
+    OTHER reserved chars (/ \\ * ? " < > |) are replaced with '-' on both
+    platforms. This is intentionally STRICTER than wiki_page._safe_filename
+    (which leaves them on POSIX / deletes them on Windows); canonical titles have
+    already been through apply_naming_convention and rarely contain them, so the
+    two implementations are byte-identical for the shapes that matter (verified by
+    the parity test in tests/test_wiki_writer_safe_filename.py).
     """
     t = html.unescape(title.strip())
-    # Forbidden on macOS/Windows/Linux: / \ : * ? " < > |
-    t = re.sub(r'[/\\:*?"<>|]', "-", t)
+    # Windows reserves ':'; map it to a readable ' —'. POSIX keeps it untouched.
+    if os.name == "nt":
+        t = t.replace(":", " —")
+    # Forbidden on macOS/Windows/Linux: / \ * ? " < > |  (':' handled above)
+    t = re.sub(r'[/\\*?"<>|]', "-", t)
     # Collapse runs of whitespace
     t = re.sub(r"\s+", " ", t).strip()
     # No trailing dots/spaces (Windows hates them)

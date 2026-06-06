@@ -407,6 +407,27 @@ class TestWikiWriter(_VaultCase):
         self.assertNotIn("source_type", text)
         self.assertNotIn("summary", text)
 
+    def test_redirect_stub_mtime_is_fresh(self):
+        """2026-05-21: Dataview's per-file metadata cache only invalidates
+        on content modify events, not atomic-replace (os.replace). Without
+        an explicit utime call, a freshly-written stub can keep an old
+        mtime that pre-dates the user's Obsidian session — so Dataview
+        skips re-indexing and the stub's old-name entry lingers in
+        queries that exclude `!redirect`. write_wiki_stub now bumps
+        mtime explicitly; this test guards the contract."""
+        import time as _t
+        from wiki_schema import write_wiki_stub
+        before = _t.time()
+        out = write_wiki_stub(
+            vault=Path(self.vault),
+            source_type="webpage",
+            old_name="Old Title To Redirect",
+            new_name="New Title After Rename",
+        )
+        # Allow a tiny grace window for FS timestamp resolution
+        # (HFS+ has 1s granularity on some macOS configs).
+        self.assertGreaterEqual(out.stat().st_mtime, before - 1.0)
+
     def test_leaked_frontmatter_in_body_stripped(self):
         """Bug class lint #48: the writer strips a leading --- block from
         body to prevent double-frontmatter rendering."""
@@ -541,17 +562,74 @@ class TestProcessClip(_VaultCase):
         self.assertIn('source: "https://linkedin.com/posts/somebody_test-7455-tF2k"', text)
 
     def test_github_clip_routes_to_repos(self):
+        """github URL via clip path → unified_ingest dispatches to the
+        repo handler. Post-migration the repo handler delegates to
+        bin/kb-capture (not present in the test temp-vault), so we stub
+        the handler to assert the routing decision without requiring
+        the real extractor. The contract this protects: github URLs
+        must NOT fall through to the webpage handler (the legacy
+        _KIND_TO_CATEGORY bug for paper/repo/video URLs)."""
+        from unittest.mock import patch
+        from pathlib import Path as _Path
         from process_clip import process_clip
+        import unified_ingest
+
         clip = self._write_clip("gh.md", "https://github.com/foo/bar")
-        path = process_clip(clip, self.vault)
-        self.assertEqual(Path(path).relative_to(self.vault).parts[:3],
+
+        dispatched = {"to": None}
+
+        def _stub_repo(inp, routing, canonical_url):
+            dispatched["to"] = "repo"
+            stub_path = _Path(self.vault) / "raw" / "repos" / "artifacts" / "stub.md"
+            stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub_path.write_text("stub", encoding="utf-8")
+            return unified_ingest.IngestResult(
+                raw_path=stub_path,
+                source_type="repo",
+                canonical_url=canonical_url,
+                title=inp.title,
+                extracted_via="test_stub",
+                was_re_routed=routing.get("was_re_routed", False),
+            )
+
+        with patch.dict(unified_ingest._HANDLERS, {"repo": _stub_repo}, clear=False):
+            path = process_clip(clip, self.vault)
+        self.assertEqual(dispatched["to"], "repo")
+        self.assertEqual(_Path(path).relative_to(self.vault).parts[:3],
                          ("raw", "repos", "artifacts"))
 
     def test_youtube_clip_routes_to_videos(self):
+        """youtube URL via clip path → unified_ingest dispatches to the
+        video handler. Same pattern as the github test above — assert
+        the routing decision without invoking the real kb-capture
+        extractor."""
+        from unittest.mock import patch
+        from pathlib import Path as _Path
         from process_clip import process_clip
+        import unified_ingest
+
         clip = self._write_clip("yt.md", "https://www.youtube.com/watch?v=abc123")
-        path = process_clip(clip, self.vault)
-        self.assertEqual(Path(path).relative_to(self.vault).parts[:3],
+
+        dispatched = {"to": None}
+
+        def _stub_video(inp, routing, canonical_url):
+            dispatched["to"] = "video"
+            stub_path = _Path(self.vault) / "raw" / "videos" / "artifacts" / "stub.md"
+            stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub_path.write_text("stub", encoding="utf-8")
+            return unified_ingest.IngestResult(
+                raw_path=stub_path,
+                source_type="video",
+                canonical_url=canonical_url,
+                title=inp.title,
+                extracted_via="test_stub",
+                was_re_routed=routing.get("was_re_routed", False),
+            )
+
+        with patch.dict(unified_ingest._HANDLERS, {"video": _stub_video}, clear=False):
+            path = process_clip(clip, self.vault)
+        self.assertEqual(dispatched["to"], "video")
+        self.assertEqual(_Path(path).relative_to(self.vault).parts[:3],
                          ("raw", "videos", "artifacts"))
 
     def test_missing_source_url_rejected(self):
@@ -1508,6 +1586,136 @@ class TestBuildFallbackDataTitleRejection(_VaultCase):
         self.assertIn("Distributed Systems", data["title"])
 
 
+# ─── Embedded image URL in title fallback ────────────────────────────
+
+
+class TestBuildFallbackDataImageURLRejection(_VaultCase):
+    """2026-05-21: LinkedIn hashtag rows like
+    `[**#tag1**](url1) [**#tag2**](url2)![View image](https://media.licdn.com/...)`
+    slipped through build_fallback_data's body scan — the line starts
+    with `[**` (not in the prefix-skip set), so the whole line (including
+    the embedded image URL) became the title candidate. apply_naming_
+    convention then stripped the URL's slashes/colons into a slug-shaped
+    garbage like 'LinkedIn: — https:media.licdn.comdmsimagev2D5622AQFS3
+    mmaNDdvvQfeeds'. Two raws were affected — Chuck Herrin's 'Compression
+    Is Attack Surface' post and the linkedin-com-feed.md feed snapshot."""
+
+    def test_rejects_line_with_embedded_licdn_image(self):
+        from wiki_page import build_fallback_data
+        body = (
+            "OMG. I get it. After two days at a course I understand why AI "
+            "is fundamentally insecurable.\n\n"
+            "[**#CracksInYourFoundationModels**](https://www.linkedin.com/search/results/all/?keywords=%23cracksinyourfoundationmodels)"
+            " [**#AISecurity**](https://www.linkedin.com/search/results/all/?keywords=%23aisecurity)"
+            "![View image](https://media.licdn.com/dms/image/v2/D5622AQFS3mmaNDdvvQ/feedshare-shrink_1280/B56Z5H.ZaUIoAM-/0/1779324000157)"
+        )
+        data = build_fallback_data(
+            body,
+            "https://linkedin.com/posts/ugcpost-7463025773600333824",
+            "webpage",
+            hint_title="Post | LinkedIn",  # generic — forces body scan
+        )
+        # The hashtag+image line must NOT become the title — the OMG
+        # prose line on the first paragraph is the only valid candidate.
+        self.assertNotIn("licdn", data["title"].lower())
+        self.assertNotIn("media.", data["title"].lower())
+        self.assertNotIn("dmsimage", data["title"].lower())
+        self.assertIn("OMG", data["title"])
+
+    def test_rejects_line_with_embedded_twimg(self):
+        """Same class on the X side: pbs.twimg.com embedded image URLs
+        must not propagate into the title."""
+        from wiki_page import build_fallback_data
+        body = (
+            "Real tweet content that explains a substantive idea worth indexing.\n\n"
+            "[link text](https://t.co/abc)"
+            "![](https://pbs.twimg.com/media/Fy_abc123.jpg)"
+        )
+        data = build_fallback_data(
+            body,
+            "https://x.com/someone/status/1234567890",
+            "webpage",
+            hint_title="X",  # generic — forces body scan
+        )
+        self.assertNotIn("twimg", data["title"].lower())
+        self.assertNotIn("pbs.", data["title"].lower())
+        self.assertIn("Real tweet content", data["title"])
+
+    def test_apply_naming_convention_rejects_url_shaped_residual(self):
+        """Defense in depth: if a URL-shaped title still reaches
+        apply_naming_convention (e.g. a hint_title that's just a URL),
+        the residual-URL check must replace it with a URL-derived slug
+        before the filename sanitizer would strip slashes/colons and
+        produce slug-garbage."""
+        from wiki_page import apply_naming_convention
+        result = apply_naming_convention(
+            "https://media.licdn.com/dms/image/v2/D5622AQFS3mmaNDdvvQ/feedshare-shrink_1280/foo",
+            "https://linkedin.com/posts/ugcpost-7463025773600333824",
+            "webpage",
+        )
+        self.assertNotIn("dmsimage", result.lower())
+        self.assertNotIn("licdn", result.lower())
+        # The URL-derived fallback uses the path (posts/ugcpost-...) so
+        # the post ID survives — that's still distinguishable.
+        self.assertIn("LinkedIn:", result)
+
+    def test_apply_naming_convention_keeps_legitimate_titles(self):
+        """Sanity: titles that aren't URL-shaped pass through unchanged
+        — only the URL-shaped-residual check is new, not a global rewrite."""
+        from wiki_page import apply_naming_convention
+        result = apply_naming_convention(
+            "Compression Is Attack Surface",
+            "https://linkedin.com/posts/ugcpost-7463025773600333824",
+            "webpage",
+        )
+        self.assertEqual(result, "LinkedIn: Compression Is Attack Surface")
+
+    def test_apply_naming_convention_strips_x_title_chrome(self):
+        """X.com's page <title> is '<DisplayName> on X: "<tweet>…" / X'.
+        The cleaner must reduce it to the tweet headline (no author, no
+        doubled 'X:', no leading backslash from a mangled \\"). Witnessed
+        2026-05-26: 'elvis on X: "New research…"' produced the broken title
+        'X: elvis on X: \\New research…'."""
+        from wiki_page import apply_naming_convention
+        url = "https://x.com/omarsar0/status/2058936160291004483"
+        # The first-line form the pipeline actually feeds in.
+        self.assertEqual(
+            apply_naming_convention(
+                'elvis on X: "New research from Microsoft Research', url, "webpage"),
+            "X: New research from Microsoft Research")
+        # The already-mangled form (opening quote turned into a backslash).
+        self.assertEqual(
+            apply_naming_convention(
+                "elvis on X: \\New research from Microsoft Research", url, "webpage"),
+            "X: New research from Microsoft Research")
+        # Trailing ' / X' chrome and a t.co tail are also stripped.
+        self.assertEqual(
+            apply_naming_convention(
+                'someone on X: "Hello world https://t.co/abc123" / X', url, "webpage"),
+            "X: Hello world")
+        # Guard: a legitimate tweet that merely contains 'on X:' (no quote
+        # right after) is NOT over-stripped of its author-less content.
+        self.assertEqual(
+            apply_naming_convention("My take on X: it is great", url, "webpage"),
+            "X: My take on X: it is great")
+
+    def test_apply_naming_convention_strips_obsidian_forbidden_chars(self):
+        """`#^[]` must never reach a wiki page name: Obsidian parses them as
+        heading/block anchors and link delimiters inside [[wikilinks]], so the
+        page becomes unclickable. Witnessed 2026-05-28: a LinkedIn hashtag-row
+        title 'LinkedIn: #agenticai #aisecurity …' produced a dead link."""
+        from wiki_page import apply_naming_convention
+        url = "https://www.linkedin.com/posts/itsecuritypartners_x-7463304018908532737-zjNp"
+        out = apply_naming_convention(
+            "#agenticai #aisecurity #securityoperations #mdr #dfir", url, "webpage")
+        self.assertNotRegex(out, r"[#^\[\]]")          # no forbidden char survives
+        self.assertEqual(out, "LinkedIn: agenticai aisecurity securityoperations mdr dfir")
+        # Mixed real-text titles keep their words, lose only the forbidden chars.
+        self.assertEqual(
+            apply_naming_convention("Issue #42 [cs.AI] ^ref", url, "webpage"),
+            "LinkedIn: Issue 42 cs.AI ref")
+
+
 # ─── Asset path rewrite for wiki ─────────────────────────────────────
 
 
@@ -1811,6 +2019,20 @@ class TestProcessClipBaitTitleRejection(_VaultCase):
         self.assertFalse(_is_bait_title("View page traffic dashboard"))
         self.assertFalse(_is_bait_title("Real Article About Profiles"))
 
+    def test_hashtag_only_title_is_bait(self):
+        """A title that is nothing but a row of hashtags is the post's tag
+        line grabbed as the <title> — no headline, and an unclickable page
+        name. Treat as bait so the body-scan picks the real text. Witnessed
+        2026-05-28: itsecuritypartners post titled
+        '#agenticai #aisecurity #securityoperations #mdr #dfir'."""
+        from process_clip import _is_bait_title
+        self.assertTrue(_is_bait_title("#agenticai #aisecurity #securityoperations #mdr #dfir"))
+        self.assertTrue(_is_bait_title("#solo"))
+        self.assertTrue(_is_bait_title("#a-b #c_d"))   # hyphen/underscore tags
+        # Real headlines that merely CONTAIN a hashtag are not bait.
+        self.assertFalse(_is_bait_title("Check out #agenticai today"))
+        self.assertFalse(_is_bait_title("Why #1 ranking matters for SEO"))
+
 
 class TestUnicodeTypographyNormalization(unittest.TestCase):
     """0.9.13: math-bold/italic Unicode chars (𝗖𝗹𝗮𝘂𝗱𝗲𝗕𝗹𝗲𝗲𝗱) get folded
@@ -1921,6 +2143,434 @@ class TestSafeUtf8SurrogateSanitization(_VaultCase):
         # Page contents otherwise intact
         self.assertIn('Surrogate Page', wiki_text)
         self.assertIn('Summary with bad byte', wiki_text)
+
+
+class TestYouTubeContentCleaning(unittest.TestCase):
+    """`_clean_youtube_content` strips the Web Clipper YouTube template's
+    comment trees and player-chrome blocks so the LLM summarizer doesn't
+    treat commenter quotes as the page's main content.
+
+    Witnessed 2026-05-31: a Pi Agent YouTube capture went through with a
+    `## 25 Comments` section nearly the size of the transcript; the wiki
+    page summary cited "pinned comment", "per top comment", and "viewer
+    comment claims" while the creator's actual description got one line.
+    These tests pin the section-strip contract.
+    """
+
+    def _body(self, sections):
+        """Build a YouTube-shaped body from a list of (heading, content) pairs."""
+        out = []
+        for h, c in sections:
+            out.append(h)
+            out.append('')
+            out.append(c)
+            out.append('')
+        return '\n'.join(out)
+
+    def test_strips_single_comments_section(self):
+        from wiki_page import _clean_youtube_content
+        body = self._body([
+            ('## Description', 'The creator wrote this.'),
+            ('## Comments', '### @alice\nGreat video!\n### @bob\nAgreed.'),
+            ('## Transcript', 'word word word'),
+        ])
+        cleaned = _clean_youtube_content(body)
+        self.assertIn('The creator wrote this.', cleaned)
+        self.assertIn('word word word', cleaned)
+        self.assertNotIn('@alice', cleaned)
+        self.assertNotIn('@bob', cleaned)
+        self.assertNotIn('Great video!', cleaned)
+        # The `## Comments` heading itself is gone, but `## Description`
+        # and `## Transcript` survive intact.
+        self.assertIn('## Description', cleaned)
+        self.assertIn('## Transcript', cleaned)
+        self.assertNotIn('## Comments', cleaned)
+
+    def test_strips_numbered_comments_heading(self):
+        from wiki_page import _clean_youtube_content
+        body = self._body([
+            ('## Description', 'desc'),
+            ('## 25 Comments', '### @whoever\npinned reply text'),
+            ('## Transcript', 'tx'),
+        ])
+        cleaned = _clean_youtube_content(body)
+        self.assertNotIn('pinned reply text', cleaned)
+        self.assertNotIn('@whoever', cleaned)
+        self.assertIn('desc', cleaned)
+        self.assertIn('tx', cleaned)
+
+    def test_strips_in_this_video_chapter_chrome(self):
+        from wiki_page import _clean_youtube_content
+        body = self._body([
+            ('## Description', 'real description here'),
+            ('## In this video', '### Jason Lee\n179K subscribers'),
+            ('## Transcript', 'transcript content'),
+        ])
+        cleaned = _clean_youtube_content(body)
+        self.assertNotIn('179K subscribers', cleaned)
+        self.assertNotIn('## In this video', cleaned)
+        self.assertIn('real description here', cleaned)
+        self.assertIn('transcript content', cleaned)
+
+    def test_strips_duplicate_comments_blocks(self):
+        # Web Clipper occasionally renders the YouTube page twice (player +
+        # full-page view), producing two `## Comments` sections separated
+        # by other sections. The stripper must hit every occurrence.
+        from wiki_page import _clean_youtube_content
+        body = self._body([
+            ('## Description', 'desc'),
+            ('## 25 Comments', '### @first\nfirst comment text'),
+            ('## Chapters', 'ch1\nch2'),
+            ('## Comments', '### @second\nsecond comment text'),
+            ('## Transcript', 'tx'),
+        ])
+        cleaned = _clean_youtube_content(body)
+        self.assertNotIn('first comment text', cleaned)
+        self.assertNotIn('second comment text', cleaned)
+        self.assertIn('## Chapters', cleaned)
+        self.assertIn('## Transcript', cleaned)
+
+    def test_preserves_body_when_no_noise_sections(self):
+        from wiki_page import _clean_youtube_content
+        body = self._body([
+            ('## Description', 'a clean capture'),
+            ('## Transcript', 'just the words'),
+        ])
+        cleaned = _clean_youtube_content(body)
+        # Exact preservation (modulo trailing whitespace) — no false strips.
+        self.assertEqual(cleaned.strip(), body.strip())
+
+    def test_preserves_h3_outside_noise_blocks(self):
+        # H3 subsections that are NOT inside a `## Comments` block must
+        # survive — they may be chapter subtitles, speaker breakdowns, etc.
+        from wiki_page import _clean_youtube_content
+        body = (
+            "## Chapters\n\n"
+            "### Intro\nIntro chapter\n\n"
+            "### Why It Matters\nMatters chapter\n\n"
+            "## Comments\n\n"
+            "### @user\nDropped comment\n\n"
+            "## Transcript\n\nthe words"
+        )
+        cleaned = _clean_youtube_content(body)
+        self.assertIn('### Intro', cleaned)
+        self.assertIn('### Why It Matters', cleaned)
+        self.assertNotIn('@user', cleaned)
+        self.assertNotIn('Dropped comment', cleaned)
+
+    def test_handles_empty_body(self):
+        from wiki_page import _clean_youtube_content
+        self.assertEqual(_clean_youtube_content(''), '')
+        self.assertEqual(_clean_youtube_content(None), None)
+
+    def test_preprocess_content_invokes_cleaner_for_youtube_urls(self):
+        # Integration smoke: preprocess_content() should run the cleaner
+        # when the raw frontmatter's source URL is YouTube.
+        from wiki_page import preprocess_content
+        raw = (
+            '---\n'
+            'title: "demo"\n'
+            'source: "https://www.youtube.com/watch?v=abc123"\n'
+            '---\n'
+            '## Description\n\nReal description.\n\n'
+            '## Comments\n\n### @alice\ncomment payload\n\n'
+            '## Transcript\n\nword word'
+        )
+        out = preprocess_content(raw)
+        self.assertNotIn('@alice', out['body'])
+        self.assertNotIn('comment payload', out['body'])
+        self.assertIn('Real description.', out['body'])
+
+    def test_preprocess_content_skips_cleaner_for_non_youtube_urls(self):
+        # Negative control: a non-YouTube URL must NOT trigger the YouTube
+        # cleaner — `## Comments` can legitimately appear on other pages
+        # (e.g., a GitHub issue threads, blog post comment sections that
+        # the user wants to keep).
+        from wiki_page import preprocess_content
+        raw = (
+            '---\n'
+            'title: "demo"\n'
+            'source: "https://example.com/blog/post"\n'
+            '---\n'
+            '## Comments\n\nA reader said something useful here.\n'
+        )
+        out = preprocess_content(raw)
+        self.assertIn('A reader said something useful here.', out['body'])
+
+
+class TestFallbackSummarySkipsHtmlComments(unittest.TestCase):
+    """`build_fallback_data` must not pick HTML comments as the page summary.
+
+    Witnessed 2026-05-31: after a fresh arcus YouTube capture where the
+    creator left the description blank, the placeholder
+    `<!-- No description available... -->` landed verbatim in the
+    wiki's `summary:` frontmatter because the paragraph picker passed
+    its length+space tests on the comment body. Placeholders are
+    derivable-from-context, not editorial content — must skip."""
+
+    def test_skips_html_comment_paragraph(self):
+        from wiki_page import build_fallback_data
+        body = (
+            "# Demo title\n\n"
+            "- **Channel/Speaker:** Someone\n"
+            "- **Duration:** 12m34s\n\n"
+            "## Description\n\n"
+            "<!-- No description available (arcus returned no description field, or the video has none). -->\n\n"
+            "## Transcript\n\n"
+            "This is the real transcript content the picker should land on instead."
+        )
+        data = build_fallback_data(
+            raw_content=body,
+            url="https://www.youtube.com/watch?v=abc",
+            source_type="video",
+            hint_title="Demo title",
+        )
+        self.assertNotIn("No description available", data["summary"])
+        self.assertNotIn("<!--", data["summary"])
+        self.assertIn("real transcript content", data["summary"])
+
+
+class TestBulkRegenSummariesUsesPreprocess(unittest.TestCase):
+    """`scripts/bulk-llm-regen-summaries.get_raw_body` must route the raw
+    through `preprocess_content` so YouTube comment trees / LinkedIn
+    sidebar junk don't reach the LLM via the synthesis-after-create flow.
+    Witnessed 2026-05-31: a YouTube wiki created via that path had a
+    comment-quoting summary because the script read raws directly,
+    bypassing the on-ingest comment-strip applied by wiki_page."""
+
+    def test_youtube_comments_stripped_before_llm(self):
+        # Import via importlib because the script has a `-` in its name
+        # (importlib accepts the full module spec; plain import doesn't).
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_bulk_regen",
+            Path(__file__).resolve().parent.parent
+            / "scripts" / "bulk-llm-regen-summaries.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory() as td:
+            vault = Path(td)
+            (vault / "raw" / "videos" / "artifacts").mkdir(parents=True)
+            raw = vault / "raw" / "videos" / "artifacts" / "video-abc.md"
+            raw.write_text(
+                "---\n"
+                'title: "demo"\n'
+                'source: "https://www.youtube.com/watch?v=abc12345DEF"\n'
+                "---\n"
+                "## Description\n\nReal description text.\n\n"
+                "## Comments\n\n### @ALICE\nalice's comment text\n\n"
+                "## Transcript\n\nthe words"
+            )
+            # Point the script's VAULT at our temp vault so its
+            # raw_path resolution works.
+            mod.VAULT = vault
+            body = mod.get_raw_body(
+                wiki_path=raw,  # unused on this path
+                fm={"raw_path": "raw/videos/artifacts/video-abc.md"},
+            )
+
+            self.assertIn("Real description text.", body)
+            self.assertIn("the words", body)
+            self.assertNotIn("@ALICE", body)
+            self.assertNotIn("alice's comment text", body)
+            self.assertNotIn("## Comments", body)
+
+
+class TestSlugYouTubeVideoId(unittest.TestCase):
+    """`derive_slug` produces `video-<vid_id>` for YouTube watch / shorts /
+    youtu.be URLs so every capture path (Web Clipper, arcus, kb-capture)
+    converges on the same slug per video. Without this, the path-only slug
+    `youtube-com-watch` collapses every YouTube capture onto one filename
+    and the next capture silently overwrites the prior raw. Witnessed
+    2026-05-31."""
+
+    def test_youtube_watch_url_uses_video_id_slug(self):
+        from slug import derive_slug
+        slug = derive_slug(
+            "videos",
+            "https://www.youtube.com/watch?v=WvuLxxDY37U",
+            "Some title",
+        )
+        self.assertEqual(slug, "video-WvuLxxDY37U")
+
+    def test_youtube_watch_url_with_extra_query_params(self):
+        from slug import derive_slug
+        slug = derive_slug(
+            "videos",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw&t=10s&feature=share",
+            None,
+        )
+        self.assertEqual(slug, "video-jNQXAC9IVRw")
+
+    def test_youtu_be_short_url(self):
+        from slug import derive_slug
+        slug = derive_slug(
+            "videos",
+            "https://youtu.be/mNsqiALIoRI",
+            "Pi Agent",
+        )
+        self.assertEqual(slug, "video-mNsqiALIoRI")
+
+    def test_youtube_shorts_url(self):
+        from slug import derive_slug
+        slug = derive_slug(
+            "videos",
+            "https://www.youtube.com/shorts/abc12345DEF",
+            None,
+        )
+        self.assertEqual(slug, "video-abc12345DEF")
+
+    def test_youtube_playlist_url_falls_through_to_path_slug(self):
+        # Playlist URLs have no single video — must NOT collapse to a
+        # `video-<id>` slug. The existing path-based slug logic owns these.
+        from slug import derive_slug
+        slug = derive_slug(
+            "videos",
+            "https://www.youtube.com/playlist?list=PLABCDEFG12345",
+            None,
+        )
+        # The path-based slug after url canonicalization (`www.` stripped):
+        self.assertEqual(slug, "youtube-com-playlist")
+        self.assertFalse(slug.startswith("video-"))
+
+    def test_two_distinct_watch_urls_get_distinct_slugs(self):
+        # The whole point of the fix: two YouTube URLs that differ ONLY
+        # in the `v=` parameter must produce different slugs. Before the
+        # fix, both collapsed to `youtube-com-watch`.
+        from slug import derive_slug
+        s1 = derive_slug("videos", "https://www.youtube.com/watch?v=AAAAAAAAAAA", None)
+        s2 = derive_slug("videos", "https://www.youtube.com/watch?v=BBBBBBBBBBB", None)
+        self.assertNotEqual(s1, s2)
+        self.assertEqual(s1, "video-AAAAAAAAAAA")
+        self.assertEqual(s2, "video-BBBBBBBBBBB")
+
+
+class TestRawPathCollisionLint(unittest.TestCase):
+    """`find_raw_path_collisions` powers `kb lint` §30d — surfaces two-or-
+    more wiki pages sharing one raw_path. Permanent guard against any
+    future URL family losing its uniqueness in slug derivation; the
+    YouTube watch bug (2026-05-31) was fixed at the slug layer but
+    other URL families could repeat the pattern."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self._tmp.name)
+        (self.vault / "wiki" / "format" / "videos").mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_wiki(self, name: str, raw_path: str) -> None:
+        (self.vault / "wiki" / "format" / "videos" / f"{name}.md").write_text(
+            "---\n"
+            f'title: "{name}"\n'
+            f'raw_path: "{raw_path}"\n'
+            "---\n\nbody.\n"
+        )
+
+    def test_detects_two_wiki_pages_pointing_at_same_raw(self):
+        # Reproduces the 2026-05-31 case: two YouTube wiki pages both
+        # write `raw_path: raw/videos/artifacts/youtube-com-watch.md`
+        # because urlparse stripped the `?v=…` distinguisher.
+        from raw_path_collisions import find_raw_path_collisions
+        self._write_wiki("YouTube — Pi Agent", "raw/videos/artifacts/youtube-com-watch.md")
+        self._write_wiki("YouTube — Jason Lee", "raw/videos/artifacts/youtube-com-watch.md")
+        out = find_raw_path_collisions(self.vault)
+        self.assertEqual(len(out), 1)
+        self.assertIn("raw/videos/artifacts/youtube-com-watch.md", out)
+        wikis = sorted(out["raw/videos/artifacts/youtube-com-watch.md"])
+        self.assertEqual(len(wikis), 2)
+        self.assertIn("wiki/format/videos/YouTube — Pi Agent.md", wikis)
+        self.assertIn("wiki/format/videos/YouTube — Jason Lee.md", wikis)
+
+    def test_silent_when_no_collision(self):
+        from raw_path_collisions import find_raw_path_collisions
+        # Post-fix world: distinct video IDs → distinct slugs → no collisions.
+        self._write_wiki("YouTube — A", "raw/videos/artifacts/video-AAAAAAAAAAA.md")
+        self._write_wiki("YouTube — B", "raw/videos/artifacts/video-BBBBBBBBBBB.md")
+        self.assertEqual(find_raw_path_collisions(self.vault), {})
+
+    def test_three_way_collision_surfaces_all_three_wiki_paths(self):
+        from raw_path_collisions import find_raw_path_collisions
+        rp = "raw/videos/artifacts/youtube-com-watch.md"
+        for n in ("A", "B", "C"):
+            self._write_wiki(f"YouTube — {n}", rp)
+        out = find_raw_path_collisions(self.vault)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out[rp]), 3)
+
+    def test_ignores_wiki_pages_without_raw_path(self):
+        # Synthesis pages (topics / insights / journal) have no raw_path
+        # at all — they're LLM-authored, not source-backed. They must NOT
+        # show up in the collision report.
+        from raw_path_collisions import find_raw_path_collisions
+        (self.vault / "wiki" / "topics").mkdir(parents=True)
+        (self.vault / "wiki" / "topics" / "AI Agents.md").write_text(
+            '---\ntitle: "AI Agents"\nsource_type: "topic"\n---\n\nsynthesis body.\n'
+        )
+        self.assertEqual(find_raw_path_collisions(self.vault), {})
+
+    def test_ignores_template_and_contents_files(self):
+        from raw_path_collisions import find_raw_path_collisions
+        rp = "raw/videos/artifacts/some-raw.md"
+        # Two _TEMPLATE.md / _Contents.md scaffolds that happen to carry
+        # `raw_path:` placeholders should be skipped even when they collide.
+        for name in ("_TEMPLATE", "_Contents"):
+            (self.vault / "wiki" / "format" / "videos" / f"{name}.md").write_text(
+                f'---\ntitle: "{name}"\nraw_path: "{rp}"\n---\n'
+            )
+        self.assertEqual(find_raw_path_collisions(self.vault), {})
+
+
+class TestArcusVideoBodyDescription(unittest.TestCase):
+    """`arcus_video._build_athena_body` emits the creator's description into
+    the `## Description` section when arcus exposes it (via SourceMetadata
+    .description, populated by arcus >= the description-support release),
+    and falls back to the placeholder comment when absent. Witnessed
+    2026-05-31: every kb-add-via-arcus YouTube raw shipped with the
+    placeholder because arcus didn't expose info['description']."""
+
+    def test_description_section_uses_metadata_value_when_present(self):
+        from arcus_video import _build_athena_body
+        body = _build_athena_body(
+            "transcript line one.",
+            channel="A Channel",
+            duration_str="3m21s",
+            date_str="2026-05-31",
+            video_description="A useful description the creator wrote.",
+        )
+        self.assertIn("## Description", body)
+        self.assertIn("A useful description the creator wrote.", body)
+        # And the placeholder comment is NOT present once we have real text.
+        self.assertNotIn("No description available", body)
+
+    def test_description_section_falls_back_to_placeholder_when_absent(self):
+        from arcus_video import _build_athena_body
+        body = _build_athena_body(
+            "transcript line one.",
+            channel="A Channel",
+            duration_str="3m21s",
+            date_str="2026-05-31",
+            video_description="",  # arcus returned no description
+        )
+        self.assertIn("## Description", body)
+        self.assertIn("No description available", body)
+
+    def test_description_whitespace_only_treated_as_absent(self):
+        # Some videos have a description that's just whitespace / a single
+        # newline. Treat that as "no description" — emitting blank into
+        # the wiki page is worse than the placeholder comment.
+        from arcus_video import _build_athena_body
+        body = _build_athena_body(
+            "tx",
+            channel="Ch",
+            duration_str="1m",
+            date_str="2026-05-31",
+            video_description="   \n  \n",
+        )
+        self.assertIn("No description available", body)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "athena-brain"
+version = "0.1.0"
+description = "Athena — Your Second Brain. AI-powered knowledge management with hybrid search."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Athena"}]
+keywords = ["knowledge-base", "mcp", "search", "obsidian", "ai", "second-brain"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+    "mcp>=1.0",
+    "sqlite-vec>=0.1.0",
+    # arcus is athena's content-extraction kernel — YouTube transcripts,
+    # HTML pages (incl. X.com tweets), PDFs, DOCX/XLSX/PPTX/EPUB.
+    # Promoted to required dep in athena's arcus-cutover release (A.2b).
+    # Open-sourced + published to PyPI 2026-05-25 (polleoai/arcus, MIT);
+    # resolves from PyPI now — no longer a path/editable install.
+    # 0.6.0 makes athena's [office] extra an active structured engine
+    # (xlsx→GFM tables, pptx→per-slide, docx→headings) via openpyxl/
+    # python-pptx/python-docx — richer output, same in-process Factory.run
+    # contract. Verified end-to-end (PDF/HTML/office); no athena code change.
+    "arcus-provider-runtime[html,pdf,office]>=0.6.0",
+]
+
+[project.optional-dependencies]
+search = ["fastembed>=0.6"]
+ocr = ["pytesseract>=0.3", "Pillow>=10.0"]
+export = ["matplotlib>=3.8", "plotly>=5.18"]
+media = ["faster-whisper>=1.0"]
+# Note: [pdf] and [office] extras dropped here — those deps now flow through
+# arcus's matching extras (declared above as base dep).
+all = [
+    "fastembed>=0.6",
+    "pytesseract>=0.3", "Pillow>=10.0",
+    "matplotlib>=3.8", "plotly>=5.18",
+    "faster-whisper>=1.0",
+]
+
+[project.scripts]
+athena = "athena.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["athena"]

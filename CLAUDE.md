@@ -6,7 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Athena is a personal learning companion that tracks technical papers, webpages, GitHub repos, images/screenshots, and videos. The system uses an LLM-maintained wiki for persistent, compounding knowledge synthesis.
 
-The full architecture reference is in `projects/athena-development/docs/athena-architecture.md`.
+The full architecture reference is in `docs/athena-architecture.md`.
+
+## Content extraction lives in arcus
+
+Per-format extraction (HTML pages incl. X.com tweets, PDFs, DOCX/XLSX/PPTX/EPUB, YouTube transcripts) is delegated to **arcus** — the published `arcus-provider-runtime` package (open-sourced at polleoai/arcus, MIT; dev source lives at `~/Projects/arcus/`). Athena imports `arcus.provider_runtime` and calls its `Factory.run(input, out_dir=...)` via three thin adapter modules: `bin/lib/arcus_html.py`, `bin/lib/arcus_file.py`, `bin/lib/arcus_video.py`. Each adapter wraps arcus's output into athena's raw .md format and writes via `raw_writer.write_raw`.
+
+**Install prerequisite:** `pip install --user "arcus-provider-runtime[html,pdf,office]"` (resolves from PyPI) plus `python3 -m playwright install chromium`. The athena `pyproject.toml` declares `arcus-provider-runtime[html,pdf,office]>=0.6.0` as a required dependency. (A local editable install — `pip install -e ~/Projects/arcus/packages/provider-runtime[...]` — is a dev-only convenience, not the end-user path.)
+
+**Athena owns** (kept in athena's bin/lib/): ingest orchestration, vault state, wiki generation, topic + entity pages, lint, search, URL routing (`bin/lib/url_detect.py`), playlist detection, paper discovery, dead-URL recording. Anything multi-source or vault-aware stays in athena.
+
+**arcus owns** (delegated): single-URL/file extraction. Given one input, return one extracted text + metadata. arcus has zero awareness of athena's vault layout, topics, or wiki — see the `feedback-arcus-pure-download-layer` memory.
 
 ## Three-Layer Architecture
 
@@ -65,32 +75,9 @@ These are non-negotiable rules for how the LLM interacts with the knowledge base
 
 5. **Data consistency and integrity is #1 priority.** No operation should leave the KB in an inconsistent state. Every command that modifies data must: update all cross-references, update index counts, and pass `kb lint` with no new issues. If a command fails mid-way, it should not leave partial changes.
 
-6. **Every data inconsistency becomes a lint check — fixed to the user's satisfaction.** This is a design principle, not a guideline. Whenever ANY data inconsistency is identified — whether reported by the user, discovered during development, found during testing, or detected during normal operation — the resolution follows this mandatory sequence:
-   1. **Fix to satisfaction** — correct the affected data AND verify with the user/developer that the fix actually works. "I fixed it" is not sufficient — the fix must be confirmed from the user's perspective. If the user says it's still broken, the investigation continues until the root cause is found and the user confirms the problem is resolved. Do not close a fix until the reporter confirms satisfaction.
-   2. **Root cause** — identify the ACTUAL root cause, not just the symptom. A surface-level fix that doesn't address why the problem occurred will recur. Trace the full chain: what produced the bad data → why it was produced → what allowed it to persist undetected.
-   3. **Add lint check** — add an automated check to `kb lint` that detects AND auto-fixes this class of issue. The check must be permanent — it runs on every `kb lint` invocation going forward. No permission needed — data integrity protection is always authorized.
-   4. **Fix the source** — update the command/template/logic that caused the inconsistency so it never produces it again.
-   
-   5. **Report upstream (reproducible, user-reviewable)** — every fix is sent back as telemetry that enables the Athena team to **reproduce and fix the problem** for the next release. The telemetry must include:
-      - **Athena version** and environment (OS, Python version, Obsidian version if relevant)
-      - **Steps to reproduce** — the exact sequence of operations that triggers the bug
-      - **Expected vs actual behavior** — what should have happened vs what went wrong
-      - **Root cause analysis** — what code/template/logic produced the bad output and why
-      - **Fix applied** — the lint check added (check number, what it detects, how it auto-fixes) and any source/template changes
-      - **Reproduction test case** — a minimal example (anonymized) that triggers the bug on a clean vault. Example: "Create a page with title containing em dash → search → click result → phantom file created"
-      
-      **The user sees exactly what will be sent and approves before transmission.** Only structural fix data and anonymized reproduction steps are reported — never user content, wiki pages, file names, or personal data. Fix history is stored in `wiki/feedback/` for the user's records. If the telemetry cannot be reproduced from the Athena team's end, the report is incomplete. See FR-6.11 (executable markdown patches) for how fixes become sharable.
-   
-   This principle exists because the same class of bug will recur. A one-time fix without a lint check means the next user (or the same user on a different page) hits the same problem. The lint check is the permanent fix. The telemetry ensures the fix helps all users, not just the one who found the bug. Examples: phantom empty files required tracing through search index → stale titles → bad wikilinks → Obsidian auto-creating files (lint #11, #12). Frontmatter blank lines required tracing through Claudian session logs to find the YAML generation bug (lint #10).
+6. **Every data inconsistency becomes a lint check.** Trace → fix → root cause → add lint auto-fix → fix the source. Lint checks are permanent; one-time fixes don't count. Full procedure in `docs/lint-discipline.md`.
 
-7. **Every problem gets the full treatment: trace → fix → prevent → lint.** When any issue is identified — whether during development, testing, user report, or lint — the resolution follows ALL of these steps:
-   1. **Trace the root cause** — identify EXACTLY how the bad data was created (which tool, which code path, which LLM behavior)
-   2. **Fix the specific instance** — correct the affected data
-   3. **Fix the source code** — update the tool/MCP handler/capture script that produced the bad data so it never creates this class of issue again
-   4. **Add a lint auto-fix** — `kb lint` must detect AND auto-fix this class of issue. Report as "auto-fixed", not as a remaining issue. The lint is the permanent safety net.
-   5. **Add prevention validation** — where possible, add validation BEFORE write (reject bad data at the point of creation, not after)
-   
-   **Code enforcement over LLM instructions.** CLAUDE.md rules are suggestions — the LLM may ignore them. Code validation is enforcement. Every quality requirement should be checked in code (lint or pre-write validation), not trusted to LLM compliance. If the lint can auto-fix it, the lint MUST auto-fix it. Users should never see issues that the code could have resolved.
+7. **Every problem gets the full treatment.** Trace, fix the specific instance, fix the source code, add a lint auto-fix, add pre-write validation. Code enforcement over LLM instructions — quality rules in CLAUDE.md are suggestions, but lint checks are enforced. Full procedure in `docs/lint-discipline.md`.
 
 ## Security Rules
 
@@ -205,6 +192,14 @@ Confirmation levels by risk:
 
 Both cue words are equivalent in capability. The user does not need to know the exact `kb` command syntax — the LLM maps intent to the right command.
 
+### Finding existing wiki pages (mandatory primitive)
+
+When locating an existing wiki page — for cross-references, dedup checks, "does X already exist?", or any "find the page about Y" task — **always use `kb search <query>` or `kb list --<type>` first**. Athena has a pre-built search index that returns ranked matches in under 100 ms.
+
+**Do NOT** enumerate `wiki/` via the Obsidian REST API (`localhost:27124/vault/wiki/...`) or via filesystem globs. That's a 500× cost multiplier — a single "find IronCurtain" lookup that should take 50 ms via `kb search` becomes hundreds of HTTP GETs that walk every wiki file. Witnessed 2026-05-19: a panel LLM enumerated ~500 wiki files via REST to locate one page; `kb search ironcurtain` would have returned it in one call.
+
+Search-first applies even when the REST API is available. The index exists precisely so the LLM doesn't have to read the vault file-by-file.
+
 ---
 
 ## Ingest Behavior — Duplicate & Related Topic Handling
@@ -255,84 +250,7 @@ Every wiki page MUST include a **Connections** section in the body (not just fro
 
 ---
 
-## Vendored Gryphon — Bump Procedure
+## Maintenance procedures (dev-only)
 
-`vendor/gryphon/` is a submodule pinned to a tagged Gryphon release. Athena always bundles the latest released Gryphon at Athena release time. There is no rsync flow: Gryphon and Athena evolve in their own dev repos and only meet via the submodule pin.
-
-**To bump to a new Gryphon release:**
-
-```bash
-cd vendor/gryphon
-git fetch origin
-git checkout <new-tag>          # e.g. 1.3.1, 1.4.0, etc. (tags use no `v` prefix)
-cd -                            # back to athena vault
-git add vendor/gryphon          # records the new pin in the parent repo
-git commit -m "vendor: bump Gryphon to <new-tag>"
-npm run build:all               # rebuild Athena's bundle against the new vendor
-```
-
-**`npm run build:all`** runs `git submodule update --init --recursive vendor/gryphon` first to ensure the working tree matches the recorded pin, then builds Gryphon's plugin and Athena's bundle. The pin is the single source of truth — never edit `vendor/gryphon/` files directly.
-
-**Why no rsync:** the previous `sync:gryphon` script copied `~/Projects/gryphon/` (your Gryphon dev tree) into `vendor/gryphon/` on every build. That collapsed the dev/release boundary and let WIP Gryphon code leak into Athena. Removed in favor of the explicit-bump-via-tag flow.
-
-**`npm run sync` — pull-and-rebuild for the local Obsidian install.** When the auto-bump CI workflow has shipped a new Gryphon submodule pin to GitHub, your local clone is stale until you pull it down. `npm run sync` does the four-step sync as one command:
-
-```bash
-npm run sync
-# Equivalent to:
-#   git pull --autostash --no-rebase --no-edit origin main
-#   git submodule update --init --recursive vendor/gryphon
-#   npm run build:gryphon && npm run build
-```
-
-Run after the auto-bump CI lands a new Athena tag (or whenever you want to fast-forward your local installation to whatever's on jivebug/athena main). After it completes, reload the Athena plugin in Obsidian to pick up the new bundle.
-
-**Hourly auto-sync via launchd (optional).** To remove the manual `npm run sync` step, install the launchd job that runs it on a schedule:
-
-```bash
-scripts/install-sync-launchd.sh
-```
-
-This copies `scripts/com.athena.sync.plist` to `~/Library/LaunchAgents/` and loads it. After install, `npm run sync` runs every hour (matches the auto-bump CI cron cadence — local catches up within ~2h of any Gryphon release). Logs go to `/tmp/athena-sync.log`. To uninstall:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.athena.sync.plist
-rm ~/Library/LaunchAgents/com.athena.sync.plist
-```
-
-You still need to reload the Athena plugin in Obsidian to see the new bundle — the launchd job updates the on-disk bundle but Obsidian only reads it on plugin load.
-
----
-
-## Implementation Reference
-
-Command and function specs for MCP server development live in `projects/athena-development/projects/athena-development/docs/mcp/`. These are **not** loaded at runtime — reference them only when developing or debugging the MCP server.
-
-### Command Specs (`projects/athena-development/projects/athena-development/docs/mcp/commands/`)
-
-| File | Commands covered |
-|---|---|
-| `ingest.md` | `kb add`, `kb batch` |
-| `query.md` | `kb query`, `kb search` |
-| `reflect.md` | `kb reflect` |
-| `journal-insight.md` | `kb journal`, `kb insight` |
-| `organize.md` | `kb create`, `kb move`, `kb merge`, `kb rename`, `kb ungroup` |
-| `lifecycle.md` | `kb remove`, `kb undo`, `kb trash`, `kb purge` |
-| `lint.md` | `kb lint` |
-| `feedback.md` | `kb report-bug`, `kb request-feature` |
-| `index-stats.md` | `kb index`, `kb stats`, `kb config`, `kb export` |
-
-### Function Specs (`projects/athena-development/projects/athena-development/docs/mcp/functions/`)
-
-| File | What it covers |
-|---|---|
-| `session-lifecycle.md` | Session start/end behavior |
-| `wiki-template.md` | Page format, merged pages |
-| `naming-conventions.md` | File slug rules |
-| `url-tracking.md` | Inbox system, statuses |
-| `index-maintenance.md` | Section evolution rules |
-| `tag-taxonomy.md` | Canonical tags + mapping |
-| `counting-rules.md` | Source/page counting methodology |
-| `social-media.md` | Link-following, platform capabilities |
-| `ingestion-rules.md` | Multi-source entry points, read depth |
-| `compounding.md` | Journal → insight promotion |
+- **Vendored Gryphon bump procedure** — `docs/vendored-gryphon-bump.md`
+- **Implementation reference (MCP server specs)** — `docs/implementation-reference.md`

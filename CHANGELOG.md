@@ -2,6 +2,54 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.2.4] — 2026-06-05
+
+Consolidates 1.2.1–1.2.4 (the intermediate bumps were vendored-Gryphon refreshes). Headline: the `kb` engine is now **native cross-platform Python**, and **LinkedIn document/carousel posts capture in full**.
+
+### Added
+
+- **Native cross-platform `kb` engine.** The entire `kb` command set *and* `bin/kb-capture` are ported from Bash to Python and run natively on **Windows, Linux, and macOS** — validated end-to-end on a 3-OS VM matrix. `ATHENA_PYTHON` env override lets you point the engine at a specific interpreter/venv (used by self-provisioning test guests). A frozen Bash oracle (`bin/kb-legacy`) backs a byte-for-byte parity test suite.
+- **LinkedIn document & carousel capture.** A clip of a LinkedIn document/carousel post now auto-promotes to a Playwright deep-capture that paginates the carousel, and `kb lint` embeds the captured slides into the wiki page in document order.
+- **`kb add-content`** — ingest pre-captured content (title + text) directly, bypassing fetch. For pages an automated fetch can't reach (auth-blocked); paste the content and Athena builds the wiki page.
+- **Thin-share tweet resolution.** A tweet that is just a pointer to another tweet now surfaces the *destination* tweet instead of dropping it (C1/C2/C3).
+- **`unified_ingest`** — a single routing/dispatch entry point behind every ingest path (Web Clipper, `kb add`, `url-new.txt`, paste, orphan reconciliation).
+
+### Changed
+
+- **arcus floor pinned to `>=0.6.0`** (resolves from PyPI). See 1.2.0 for the arcus cutover itself.
+- **Search-first wiki lookup** — page lookups go through the prebuilt index; dropped watchdog log spam.
+
+### Fixed
+
+- **Capture / titles:** YouTube ingest is clean end-to-end (comments stripped, description captured, stable `video-<id>` slug); X.com `"<name> on X: …"` title chrome stripped; embedded image URLs no longer leak into wiki titles; Obsidian-forbidden characters stripped from page names; conference PDF titles expand acronyms and stop truncating at 65 chars; file slugs stop truncating at 60 chars and dropping the tail.
+- **Data integrity / lint:** dead-URL records that were later captured are cleared (resurrection check); the dead-URL ledger is rewritten atomically; merge/rename filenames keep the `Prefix: Title` colon on POSIX; the raw-frontmatter reader lint check covers every module; URL Tracker links resolve to real pages; the default-config hash warning no longer fires on legitimate committed edits; thin-clip auto-fix trashes the matching asset directory atomically.
+- Frontmatter scalars are kept on a single physical line.
+
+## [1.2.0] — 2026-05-18
+
+**arcus cutover (Plan A.2b)**. Athena's per-format content extraction (HTML pages incl. X.com tweets, PDFs, DOCX/XLSX/PPTX/EPUB, YouTube transcripts) now goes through the new [arcus](https://github.com/jivebug/arcus) content-extraction kernel. Athena owns vault-aware orchestration; arcus owns single-source extraction.
+
+### Added
+
+- **`arcus-provider-runtime[html,pdf,office]` as a required dependency** (`server/pyproject.toml`). Install: `pip install --user --break-system-packages -e ~/Projects/arcus/packages/provider-runtime[html,pdf,office]` plus `python3 -m playwright install chromium`.
+- **`bin/lib/arcus_html.py`** — adapter for HTML / X.com tweet extraction via arcus's HtmlProvider. Used by kb-capture's webpage + tweet + LinkedIn-fallback branches. `--print-body` mode returns text-only for the upstream tweet/LinkedIn pre-fetch paths.
+- **`bin/lib/arcus_file.py`** — adapter for PDF / DOCX / XLSX / PPTX / EPUB extraction via arcus's PdfProvider + DocsProvider. Used by `bin/ingest-file`.
+- **`bin/lib/url_detect.py`** — athena-only URL routing (verbatim lift of `detect_type` from the deleted `file_extract.py`). Knows `github→repo`, `arxiv→paper`, `drive→paper`, etc. — concepts arcus has no awareness of.
+
+### Removed (~1900 LOC)
+
+- `bin/lib/fetch-page.py` (1241 LOC) — superseded by arcus's HtmlProvider
+- `bin/lib/fetch-tweet.py` (59 LOC) — superseded by arcus's HtmlProvider xcom path
+- `bin/lib/file_extract.py` (433 LOC) — split: routing → `url_detect.py`; extraction → arcus
+- `bin/lib/html2md.mjs` (202 LOC) — vendored inside arcus's `providers/html/`
+- All four files removed from the `.obsidian/plugins/athena/bin/lib/` bundle too.
+
+### Changed
+
+- `bin/kb-capture` shrinks by 108 LOC. The webpage branch's html2md.mjs + Playwright fallback 2-tier ladder collapses to one `arcus_html.py --print-body` call. Tweet + LinkedIn pre-fetch paths route through the same adapter.
+- `bin/ingest-file` shrinks by 21 LOC. The post-download extract_text + _write_raw block becomes a single `arcus_file.ingest_local_file()` call. Download logic stays in athena (vault-aware: Drive special-handling, dead-URL recording, magic-byte validation).
+- `CLAUDE.md` documents the arcus integration + install prerequisites + the athena-vs-arcus responsibility split.
+
 ## [1.1.1] — 2026-05-18
 
 Release-process cleanup version. No functional or API change vs 1.1.0; this release exists to re-trigger Obsidian's Community Plugins directory automated review with the cleaned-up release-asset set.
