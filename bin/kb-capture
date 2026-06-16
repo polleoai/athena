@@ -452,29 +452,55 @@ def resolve_tweet(url: str, original_url: str, state: dict) -> str:
                   .replace("&gt;", ">"))
     tweet_text = re.sub(r" +", " ", tweet_text)[:2000]
 
-    # ALWAYS prefer arcus for X tweets (oembed truncates).
-    img_tmp = _mktemp()
-    print("  Fetching tweet via arcus (text + images + paragraph breaks)...")
-    with open(img_tmp, "w", encoding="utf-8") as efh:
-        proc = _run([PYBIN, os.path.join(KB_ROOT, "bin", "lib", "arcus_html.py"),
-                     "--vault", KB_ROOT, "--url", clean_tweet, "--print-body"],
-                    stdout=subprocess.PIPE, stderr=efh, text=True, errors="replace")
-    pw_text = proc.stdout if proc.returncode == 0 else ""
-    truncated = ("…" in tweet_text or "pic.twitter.com" in tweet_text
-                 or "x.com/i/article" in tweet_text or len(tweet_text) < 200)
-    if pw_text:
-        tweet_text = pw_text
-        img_count = 0
-        try:
-            with open(img_tmp, encoding="utf-8", errors="replace") as fh:
-                img_count = sum(1 for ln in fh if ln.startswith("IMG: "))
-        except OSError:
-            pass
-        print(f"  Captured {len(tweet_text)} chars + {img_count} images")
-    elif truncated:
-        print("  arcus returned no content — using oembed text")
+    # Prefer the public syndication CDN (gh-free, no Playwright): full
+    # note_tweet text + media for regular tweets, and the real title / preview
+    # / cover for long-form X Articles (whose visible body is just a t.co
+    # pointer). Same stdlib helper the Obsidian plugin uses, so plugin + CLI
+    # tweet captures stay consistent. Falls back to arcus (Playwright) and then
+    # the oembed text below if syndication is unavailable.
+    syn_body = ""
+    try:
+        import fetch_tweet as _ft
+        _parsed = _ft.parse_status_url(clean_tweet)
+        if _parsed:
+            _data = _ft.fetch_tweet_json(_parsed[1])
+            if _data:
+                syn_body = _ft.build_body(clean_tweet, _data)
+                _art_title = _ft.article_title(_data)
+                if _art_title and not state.get("desc"):
+                    state["desc"] = _art_title
+    except Exception:  # noqa: BLE001 — any failure falls back to arcus/oembed
+        syn_body = ""
+
+    # >= 80 chars: reject a near-empty/error-shaped syndication body (frontmatter
+    # + a stub line clears ~80) and fall through to arcus/oembed for those.
+    if syn_body and len(syn_body) >= 80:
+        tweet_text = syn_body
+        print(f"  Captured {len(tweet_text)} chars via syndication CDN")
     else:
-        print("  arcus failed; oembed text retained")
+        # ALWAYS prefer arcus for X tweets (oembed truncates).
+        img_tmp = _mktemp()
+        print("  Fetching tweet via arcus (text + images + paragraph breaks)...")
+        with open(img_tmp, "w", encoding="utf-8") as efh:
+            proc = _run([PYBIN, os.path.join(KB_ROOT, "bin", "lib", "arcus_html.py"),
+                         "--vault", KB_ROOT, "--url", clean_tweet, "--print-body"],
+                        stdout=subprocess.PIPE, stderr=efh, text=True, errors="replace")
+        pw_text = proc.stdout if proc.returncode == 0 else ""
+        truncated = ("…" in tweet_text or "pic.twitter.com" in tweet_text
+                     or "x.com/i/article" in tweet_text or len(tweet_text) < 200)
+        if pw_text:
+            tweet_text = pw_text
+            img_count = 0
+            try:
+                with open(img_tmp, encoding="utf-8", errors="replace") as fh:
+                    img_count = sum(1 for ln in fh if ln.startswith("IMG: "))
+            except OSError:
+                pass
+            print(f"  Captured {len(tweet_text)} chars + {img_count} images")
+        elif truncated:
+            print("  arcus returned no content — using oembed text")
+        else:
+            print("  arcus failed; oembed text retained")
     # Record discovered destination tweet(s) in the pointer's own raw body so
     # extract_canonical_urls + the lint cross-link check can establish the
     # bidirectional reference once the destination is ingested. (C1)
@@ -937,6 +963,28 @@ def handle_repo(url, slug_, date, dirs, state) -> tuple[str, str]:
                 repo_branch = proc.stdout.strip()
         except (FileNotFoundError, OSError):
             repo_branch = ""
+    if not readme_ok:
+        # No gh CLI (or the gh call failed): fetch the README directly from
+        # raw.githubusercontent.com. This keeps the README path working on
+        # end-user machines without gh — the Obsidian plugin routes repo
+        # captures through this code, and Community-Plugin installs can't
+        # assume gh is present. Try the common default-branch names + README
+        # spellings; -f makes a 404 produce empty stdout (see _curl).
+        _owner = parts.split("/", 1)[0]
+        _repo = parts.rsplit("/", 1)[-1]
+        for _branch in ("main", "master"):
+            for _fname in ("README.md", "readme.md", "Readme.md", "README.rst", "README"):
+                body = _curl(["-sfL", "--max-time", "15",
+                              f"https://raw.githubusercontent.com/{_owner}/{_repo}/{_branch}/{_fname}"])
+                if body and body.strip():
+                    with open(readme_tmp, "w", encoding="utf-8") as fh:
+                        fh.write(body)
+                    if os.path.getsize(readme_tmp) > 0:
+                        readme_ok = True
+                        repo_branch = _branch
+                    break
+            if readme_ok:
+                break
     if not readme_ok:
         with open(readme_tmp, "w", encoding="utf-8") as fh:
             fh.write("<!-- README fetch failed. Paste README manually or run ingest workflow. -->\n")

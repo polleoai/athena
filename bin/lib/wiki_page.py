@@ -1669,6 +1669,27 @@ def update_index_counts(vault_path):
         pass
 
 
+def _source_type_and_subdir_from_raw_path(raw_path):
+    """Map a raw artifact path to its (source_type, wiki_subdir) by matching
+    the raw's category directory against the configured categories.
+
+    Separators are normalized to `/` first: on native Windows `raw_path`
+    arrives with `\\` (e.g. `raw\\videos\\artifacts\\video-X.md`), and the
+    forward-slash category match would silently fail there → every
+    Windows-captured source falls through to the `webpage` default. Witnessed
+    on the Windows VM matrix (AT-4): a youtube video wiki was written to
+    wiki/format/webpages instead of wiki/format/videos. Substring match works
+    for both flat (`raw/papers/X.pdf`) and nested (`raw/papers/artifacts/X.pdf`)
+    layouts.
+    """
+    from config import raw_categories, wiki_format_dir
+    raw_path_match = (raw_path or '').replace('\\', '/')
+    for cat_name, cat_cfg in raw_categories().items():
+        if f'/{cat_name}/' in raw_path_match or raw_path_match.startswith(f'{cat_name}/'):
+            return cat_cfg['source_type'], wiki_format_dir(cat_name)
+    return 'webpage', wiki_format_dir('webpages')
+
+
 # ── Main entry point ─────────────────────────────────────────────
 
 def create_wiki_page(vault_path, raw_path, url=None, llm_result=None,
@@ -1724,14 +1745,7 @@ def create_wiki_page(vault_path, raw_path, url=None, llm_result=None,
     # Determine source type from the raw_path by matching against configured
     # category directories. Substring match works for both flat
     # (`raw/papers/X.pdf`) and nested (`raw/papers/artifacts/X.pdf`) layouts.
-    from config import raw_categories, wiki_format_dir
-    source_type = 'webpage'
-    wiki_subdir = wiki_format_dir('webpages')
-    for cat_name, cat_cfg in raw_categories().items():
-        if f'/{cat_name}/' in raw_path or raw_path.startswith(f'{cat_name}/'):
-            source_type = cat_cfg['source_type']
-            wiki_subdir = wiki_format_dir(cat_name)
-            break
+    source_type, wiki_subdir = _source_type_and_subdir_from_raw_path(raw_path)
 
     # Use LLM result if available, otherwise build fallback data
     if llm_result and llm_result.get('title') and llm_result.get('body'):

@@ -2,6 +2,27 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.3.0] — 2026-06-15
+
+Headline: **GitHub repos and X/Twitter posts now capture cleanly** with purpose-built extractors instead of the generic page reader, and Athena runs correctly on **native Windows**. Bundles **Gryphon 2.4.0**.
+
+### Added
+
+- **Dedicated GitHub repository capture.** Clipping or adding a GitHub repo now pulls the real README through GitHub's API — so the README's own images and content thumbnails come through intact, instead of the generic DOM reader's mangled, fixed-width image dump. Falls back to a normal page capture if the repo can't be reached.
+- **Dedicated X/Twitter capture.** Tweets and long-form X Articles are captured via X's public syndication endpoint — full post text, the author, media, and (for Articles) the title, cover, and preview — instead of the truncated link-only snippet the page reader produced.
+
+### Fixed
+
+- **Windows: pages landed in the wrong category.** On native Windows, a captured video (or other typed source) could have its wiki page written under *Webpages* instead of its correct section (Videos, Repos, …) because of a path-separator mismatch. Pages now land in the right place on every OS. A `kb lint` check surfaces any previously-miscategorized page for relocation.
+
+### Security
+
+- Hardened the new capture paths against untrusted remote content: newline-stripping before writing page frontmatter (prevents metadata injection), a guard so a crafted README image can't point off-repository, response-size caps, and stricter tweet-URL matching.
+
+### Changed
+
+- **Vendored Gryphon → 2.4.0.** The public build bundles the current Gryphon (headless provider-backend session API).
+
 ## [1.2.4] — 2026-06-05
 
 Consolidates 1.2.1–1.2.4 (the intermediate bumps were vendored-Gryphon refreshes). Headline: the `kb` engine is now **native cross-platform Python**, and **LinkedIn document/carousel posts capture in full**.

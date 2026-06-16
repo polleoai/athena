@@ -19,23 +19,35 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 
-def rewrite_readme(owner: str, repo: str, branch: str, readme_path: Path) -> int:
-    """Rewrite the README in place. Returns the number of rewrites applied."""
+def rewrite_readme_text(owner: str, repo: str, branch: str, content: str) -> tuple[str, int]:
+    """Rewrite relative image URLs in README markdown text to absolute
+    raw.githubusercontent.com URLs. Returns (rewritten_text, rewrite_count).
+
+    This is the pure-string core of the rewrite — both the in-place file
+    path (``rewrite_readme``) and the in-plugin gh-free fetcher
+    (``fetch_github_readme``) call it so there is a single source of truth
+    for image-URL resolution + table normalization.
+    """
     base = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/"
-    content = readme_path.read_text(encoding="utf-8", errors="ignore")
     count = 0
 
     def resolve(src: str) -> str:
         nonlocal count
+        orig = src
         if re.match(r"^(https?:|data:|mailto:|#|//)", src, re.IGNORECASE):
             return src
         # Strip leading ./ and any leading /
         src = src.lstrip("/")
         if src.startswith("./"):
             src = src[2:]
-        # Some repos use "blob/main/path" GitHub URLs in src — skip rewriting those
+        resolved = urljoin(base, src)
+        # Guard against `../` traversal: a crafted README image path must not
+        # escape this repo's raw.githubusercontent.com prefix (which would point
+        # the renderer at a different owner/repo). If it escapes, don't rewrite.
+        if not resolved.startswith(base):
+            return orig
         count += 1
-        return urljoin(base, src)
+        return resolved
 
     # HTML <img src="...">
     content = re.sub(
@@ -53,6 +65,13 @@ def rewrite_readme(owner: str, repo: str, branch: str, readme_path: Path) -> int
     )
 
     content = _normalize_table_rows(content)
+    return content, count
+
+
+def rewrite_readme(owner: str, repo: str, branch: str, readme_path: Path) -> int:
+    """Rewrite the README in place. Returns the number of rewrites applied."""
+    content = readme_path.read_text(encoding="utf-8", errors="ignore")
+    content, count = rewrite_readme_text(owner, repo, branch, content)
     readme_path.write_text(content, encoding="utf-8")
     return count
 

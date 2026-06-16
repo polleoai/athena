@@ -1830,13 +1830,72 @@ class AthenaPlugin extends Plugin {
         }
       } catch {}
 
-      updateStatus("Capturing URL...");
+      // GitHub repos: fetch the real README (gh-free) FIRST. The bundled
+      // Python helper hits the public GitHub REST API over plain HTTP and
+      // rewrites relative image paths to absolute raw.githubusercontent URLs
+      // — github.com-matching markdown with every ![]() thumbnail + correctly
+      // sized image, and NO `gh` dependency (so it works on end-user
+      // machines). If it fails (private repo / offline / rate-limited),
+      // repoReadmeRaw stays null and we fall through to the kb-capture (gh)
+      // path in the `else if (!repoReadmeRaw)` branch below.
+      let repoReadmeRaw = null;
+      if (isRepo) {
+        const _rm = cleanUrl.match(/github\.com\/([^/]+)\/([^/?#]+)/i);
+        if (_rm) {
+          updateStatus("Fetching README...");
+          repoReadmeRaw = await this._captureGithubReadme(_rm[1], _rm[2], cleanUrl);
+        }
+      }
+      if (repoReadmeRaw) {
+        try { fs.mkdirSync(path.dirname(rawFilePath), { recursive: true }); } catch {}
+        fs.writeFileSync(rawFilePath, repoReadmeRaw);
+        rawContent = repoReadmeRaw;
+      }
+
+      // X/Twitter status: fetch via the public syndication CDN FIRST (gh-free,
+      // no Playwright). The generic DOM walker mangles tweets — for a long-form
+      // X Article the visible body is just a t.co shortlink (lang="zxx"), so
+      // the walker titles the page with the shortlink and grabs a truncated
+      // preview (witnessed: FakeMaidenMaker/status/2064900447375085823,
+      // 2026-06-12). The bundled helper reads cdn.syndication.twimg.com, which
+      // returns the real author, full note_tweet text, media, and the Article
+      // title/preview/cover over plain HTTP with no auth. On failure (deleted /
+      // protected / offline) tweetRaw stays null and we fall through to the
+      // browser-capture path below — degraded-but-present floor preserved.
+      let tweetRaw = null;
+      if (isTweet) {
+        updateStatus("Fetching tweet...");
+        tweetRaw = await this._captureTweet(cleanUrl);
+        if (tweetRaw) {
+          try { fs.mkdirSync(path.dirname(rawFilePath), { recursive: true }); } catch {}
+          fs.writeFileSync(rawFilePath, tweetRaw);
+          rawContent = tweetRaw;
+        }
+      }
+
+      if (!repoReadmeRaw && !tweetRaw) updateStatus("Capturing URL...");
       // 1.0.16: browserCapture returns { title, text, images } instead
       // of just text. We use title for the real frontmatter title
       // (was hardcoded "Page" / "X Post" / "Git \u2014 repo" fallback) and
       // append images as HTML <img> markdown so image-heavy pages
       // (Cisco blog etc.) actually carry their images into the raw.
-      const browserResult = await this.browserCapture(cleanUrl, updateStatus);
+      // GitHub repos MUST NOT go through the generic DOM walker WHEN the
+      // dedicated helper succeeds — it force-normalizes every <img> to
+      // width="600"/alt="Image", keeps invisible spacer/icon images, mangles
+      // link-wrapped [<img>](href) structures, and drops the README's markdown
+      // ![]() thumbnails (witnessed: roboflow/notebooks, 2026-06-08).
+      // Gate on the RESULT (repoReadmeRaw / tweetRaw), not the intent: when the
+      // helper SUCCEEDS we skip the DOM walker; when it FAILS (private /
+      // rate-limited / offline repo, or a non-repo github URL) repoReadmeRaw is
+      // null → fall back to browserCapture for a degraded-but-present floor
+      // rather than hard-failing on plugin-only installs that have no
+      // bin/kb-capture. (kb-capture's repo path hits the same api.github.com /
+      // raw.githubusercontent.com endpoints, so it would fail identically — the
+      // browser floor loses nothing.) The "captured via DOM walker" lint check
+      // then surfaces the degraded raw for re-capture once the cause clears.
+      const browserResult = (repoReadmeRaw || tweetRaw)
+        ? null
+        : await this.browserCapture(cleanUrl, updateStatus);
       if (browserResult) {
         const browserText = browserResult.text || "";
         const browserTitle = (browserResult.title || "").trim();
@@ -1937,7 +1996,7 @@ class AthenaPlugin extends Plugin {
         // even though browser capture succeeded — opaque user-facing error.
         try { fs.mkdirSync(path.dirname(rawFilePath), { recursive: true }); } catch {}
         fs.writeFileSync(rawFilePath, rawContent);
-      } else {
+      } else if (!repoReadmeRaw && !tweetRaw) {
         updateStatus("Webview capture failed, trying Python backend...");
         const captureResult = await this.runMechanical("add", [cleanUrl], null, view);
         const captureOutput = (captureResult.stdout || "") + (captureResult.stderr || "");
@@ -2824,6 +2883,79 @@ ${taggingRules ? `- tags: follow these tagging rules:\n${taggingRules}` : "- tag
     } catch (e) {
       console.log("[athena] @electron/remote not available:", e.message);
     }
+  }
+
+  // Fetch a GitHub repo's README (gh-free) via the bundled Python helper
+  // (bin/lib/fetch_github_readme.py). Returns the complete raw .md string,
+  // or null on ANY failure (private repo, offline, rate-limited, Python
+  // missing) so the caller cleanly falls back to its other capture paths.
+  // Repos must never use the generic DOM walker — it mangles README images
+  // (forces width=600, drops ![]() thumbnails). Witnessed: roboflow/notebooks
+  // (2026-06-08). The helper reuses the same image-rewrite as the CLI's
+  // kb-capture, so plugin + CLI repo captures stay consistent.
+  _captureGithubReadme(owner, repo, url) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+      try {
+        execFile(
+          pythonCmd(),
+          [
+            resolvePythonScript(this, "bin/lib/fetch_github_readme.py"),
+            owner,
+            repo.replace(/\.git$/, ""),
+            url,
+          ],
+          { encoding: "utf8", timeout: 20000, maxBuffer: 32 * 1024 * 1024 },
+          (err, stdout) => {
+            if (err) {
+              console.warn("[athena] gh-free README fetch failed, falling back:",
+                err.message);
+              return finish(null);
+            }
+            const raw = (stdout || "").trim();
+            finish(raw.length > 200 ? raw : null);
+          },
+        );
+      } catch (e) {
+        console.warn("[athena] gh-free README fetch threw:", e && e.message);
+        finish(null);
+      }
+    });
+  }
+
+  // Fetch an X/Twitter status via the bundled Python helper
+  // (bin/lib/fetch_tweet.py), which reads the public syndication CDN — no auth,
+  // no Playwright. Returns the complete raw .md string, or null on ANY failure
+  // (deleted/protected tweet, offline, rate-limited, Python missing) so the
+  // caller cleanly falls back to its browser-capture path. Tweets must never
+  // use the generic DOM walker: for X Articles the visible body is just a t.co
+  // pointer, so the walker captures a truncated preview + shortlink title.
+  // Witnessed: FakeMaidenMaker/status/2064900447375085823 (2026-06-12).
+  _captureTweet(url) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+      try {
+        execFile(
+          pythonCmd(),
+          [resolvePythonScript(this, "bin/lib/fetch_tweet.py"), url],
+          { encoding: "utf8", timeout: 20000, maxBuffer: 32 * 1024 * 1024 },
+          (err, stdout) => {
+            if (err) {
+              console.warn("[athena] syndication tweet fetch failed, falling back:",
+                err.message);
+              return finish(null);
+            }
+            const raw = (stdout || "").trim();
+            finish(raw.length > 80 ? raw : null);
+          },
+        );
+      } catch (e) {
+        console.warn("[athena] syndication tweet fetch threw:", e && e.message);
+        finish(null);
+      }
+    });
   }
 
   // updateStatus (optional) surfaces fallback transitions in the chat
