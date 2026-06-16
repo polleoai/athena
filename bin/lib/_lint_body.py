@@ -240,6 +240,46 @@ for f in wiki_files:
         wiki_urls.add(u.rstrip('/'))
 check("Broken raw_path (wiki → raw file missing)", broken_paths)
 
+# Check wiki located in a category dir that disagrees with its raw_path's
+# category. Witnessed on the Windows VM matrix (AT-4): a youtube video raw
+# (raw/videos/) was given a wiki under wiki/format/webpages/ because
+# create_wiki_page matched the category with forward slashes against a native
+# backslash raw_path (`raw\videos\...`) → miscategorized as a webpage. Source
+# fixed in wiki_page._source_type_and_subdir_from_raw_path (+ test_wiki_page_
+# category_path.py); this surfaces any legacy stragglers for re-creation.
+miscategorized_wiki = []
+try:
+    from config import raw_categories, wiki_format_dir
+    _cat_to_wiki_sub = {c: os.path.basename(wiki_format_dir(c)) for c in raw_categories()}
+    for f in wiki_files:
+        rel = os.path.relpath(f, KB).replace('\\', '/')
+        m = re.search(r'wiki/format/([^/]+)/', rel)
+        if not m:
+            continue
+        actual_sub = m.group(1)
+        fm, _ = extract_frontmatter(f)
+        rp = fm.get('raw_path')
+        if not rp or not isinstance(rp, str):
+            continue
+        rp_norm = rp.replace('\\', '/')
+        expected_sub = None
+        for cat_name in raw_categories():
+            if f'/{cat_name}/' in rp_norm or rp_norm.startswith(f'{cat_name}/'):
+                expected_sub = _cat_to_wiki_sub.get(cat_name)
+                break
+        if expected_sub and actual_sub != expected_sub:
+            miscategorized_wiki.append(
+                f"{os.path.basename(f)} in format/{actual_sub} but raw_path "
+                f"is {rp} (expected format/{expected_sub})"
+            )
+except Exception as _e:
+    print(f"  WARNING: miscategorization check skipped: {_e}", file=sys.stderr)
+# Gate the check() on a non-empty result so total_checks stays byte-identical to
+# the frozen Bash oracle (kb-legacy, which has no such check) on vaults with none
+# — same discipline as the browser_captured_* checks below.
+if miscategorized_wiki:
+    check("Wiki miscategorized vs raw_path category (re-create to relocate)", miscategorized_wiki)
+
 # Check raw files with no wiki page
 # Video course transcripts are OK if referenced in the course wiki page body
 # Match by file path references OR by YouTube video ID in watch links
@@ -1150,6 +1190,59 @@ for f in wiki_files:
     if raw_url and normalize_url(raw_url) != normalize_url(wiki_url):
         url_mismatches.append(f"{os.path.basename(f)}: wiki={wiki_url} raw={raw_url}")
 check("URL mismatch (wiki url ≠ raw file url)", url_mismatches)
+
+# GitHub repos captured via the Obsidian plugin's generic DOM walker land with
+# clipped_via: browser-capture — every <img> force-sized to width="600", the
+# README's markdown ![]() thumbnails dropped, and invisible spacer/icon images
+# retained. The correct path (bin/kb-capture) fetches the real README via the
+# GitHub API (or raw.githubusercontent) and rewrites image paths. Surface any
+# repo raw still on the wrong path so it can be re-captured. NOT auto-fixed:
+# re-capture is a network operation (discover-and-surface, never auto-fetch).
+# Witnessed: roboflow/notebooks, 2026-06-08.
+browser_captured_repos = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'repos', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            head = fh.read(2000)
+    except (IOError, UnicodeDecodeError):
+        continue
+    if re.search(r'^clipped_via:\s*"?browser-capture"?\s*$', head, re.MULTILINE):
+        browser_captured_repos.append(
+            f"{os.path.basename(rf)}: re-capture via `kb add <url>` "
+            f"(DOM-walker images are degraded)")
+# Python-only check (the frozen Bash oracle has none); the check() call is
+# gated on a non-empty result so total_checks stays byte-identical to the
+# oracle on vaults with no DOM-walked repos (the parity fixture seeds none).
+if browser_captured_repos:
+    check("GitHub repos captured via DOM walker (re-capture for correct images)",
+          browser_captured_repos)
+
+# X/Twitter status posts captured via the generic DOM walker land the same way
+# (clipped_via: browser-capture). For a long-form X Article the visible tweet
+# body is just a t.co pointer (lang="zxx"), so the walker titles the page with
+# the shortlink and grabs a truncated preview. The correct path (fetch_tweet.py
+# → cdn.syndication.twimg.com) returns the real author, full text, media, and
+# the Article title/preview/cover. Surface any tweet raw still on the wrong
+# path. Gated on the tweet source pattern — generic webpages legitimately use
+# the DOM walker. NOT auto-fixed (re-capture is a network op). Witnessed:
+# FakeMaidenMaker/status/2064900447375085823, 2026-06-12.
+browser_captured_tweets = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            head = fh.read(2000)
+    except (IOError, UnicodeDecodeError):
+        continue
+    if not re.search(r'^clipped_via:\s*"?browser-capture"?\s*$', head, re.MULTILINE):
+        continue
+    if re.search(r'^source:\s*"?https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/',
+                 head, re.MULTILINE):
+        browser_captured_tweets.append(
+            f"{os.path.basename(rf)}: re-capture via `kb add <url>` "
+            f"(DOM-walker truncates tweets/X Articles)")
+if browser_captured_tweets:
+    check("X/Twitter posts captured via DOM walker (re-capture for full content)",
+          browser_captured_tweets)
 
 # ═══════════════════════════════════════════════════
 header("7. OBSIDIAN RENDER VERIFICATION")
