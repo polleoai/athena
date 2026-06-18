@@ -465,6 +465,9 @@ def resolve_tweet(url: str, original_url: str, state: dict) -> str:
         if _parsed:
             _data = _ft.fetch_tweet_json(_parsed[1])
             if _data:
+                if resolve_x_article(_data):
+                    _cleanup()
+                    sys.exit(0)   # deep-capture wrote the full-article raw
                 syn_body = _ft.build_body(clean_tweet, _data)
                 _art_title = _ft.article_title(_data)
                 if _art_title and not state.get("desc"):
@@ -518,6 +521,44 @@ def _og_extract(raw_html: str, prop: str, dotall: bool) -> str:
     if m:
         return _html.unescape(m.group(1))
     return ""
+
+
+def _should_deep_capture_article(data: dict, marker_exists: bool, env: dict) -> bool:
+    """Pure: auto-promote an X Article to capture-deep only when it IS an
+    article, a Playwright X session marker exists, and the user hasn't disabled
+    it via ATHENA_X_DEEPCAPTURE=0."""
+    import fetch_tweet as _ft
+    if not _ft.is_x_article(data):
+        return False
+    if not marker_exists:
+        return False
+    if env.get("ATHENA_X_DEEPCAPTURE", "1") == "0":
+        return False
+    return True
+
+
+def resolve_x_article(data: dict) -> bool:
+    """If `data` is an X Article and an X session is present, render the full
+    article via capture-deep. Returns True iff the deep-capture succeeded (the
+    caller should then exit kb-capture — the deep raw is authoritative)."""
+    import fetch_tweet as _ft
+    marker = os.path.join(os.path.expanduser("~"), ".athena",
+                          "playwright-userdata", ".athena-x-auth-confirmed")
+    if not _should_deep_capture_article(data, os.path.isfile(marker), os.environ):
+        return False
+    art_url = _ft.article_url(data)
+    if not art_url:
+        return False
+    print(f"  X Article detected — auto-promoting to capture-deep: {art_url}")
+    env = dict(os.environ, KB_ROOT=KB_ROOT)
+    kb_bin = os.path.join(KB_ROOT, "bin", "kb")
+    proc = subprocess.run([PYBIN, kb_bin, "capture-deep", art_url],
+                          cwd=KB_ROOT, env=env)
+    if proc.returncode == 0:
+        print("  capture-deep succeeded — full article captured")
+        return True
+    print("  capture-deep failed — keeping syndication preview")
+    return False
 
 
 def resolve_linkedin(url: str, state: dict):

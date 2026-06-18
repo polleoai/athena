@@ -1,0 +1,11 @@
+{
+  "name": "@athena/vm-tests-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VM-side manifest, bundled to the bundle root as package.json. @shared/argus → file:argus resolves the argus copy the bundle extracts to <bundle-root>/argus. driverInstall runs `npm install` against this.",
+  "dependencies": {
+    "@shared/argus": "file:argus",
+    "@playwright/test": "^1.45.0",
+    "playwright": "^1.45.0"
+  }
+}

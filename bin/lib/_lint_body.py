@@ -1244,6 +1244,23 @@ if browser_captured_tweets:
     check("X/Twitter posts captured via DOM walker (re-capture for full content)",
           browser_captured_tweets)
 
+# X Articles stored preview-only (full body needs the cookie-reuse deep-capture).
+# Identified by the article-preview marker line emitted by fetch_tweet. Surface
+# (never auto-fetch) so they can be re-captured once an X session is imported.
+x_article_preview = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            txt = fh.read()
+    except (IOError, UnicodeDecodeError):
+        continue
+    if 'This is a long-form X Article. Read the full piece:' in txt:
+        x_article_preview.append(
+            f"{os.path.basename(rf)}: preview-only X Article "
+            f"(re-capture with an X session for the full body)")
+if x_article_preview:
+    check("X Articles stored preview-only (re-capture for full body)", x_article_preview)
+
 # ═══════════════════════════════════════════════════
 header("7. OBSIDIAN RENDER VERIFICATION")
 # ═══════════════════════════════════════════════════

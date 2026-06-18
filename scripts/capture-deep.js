@@ -101,6 +101,111 @@ const POST_BODY_SELECTORS = [
   '[role="article"]',
 ];
 
+// X Article rich-text body. Verified against the logged-in DOM (2026-06-16):
+// the article renders inside `[data-testid="longformRichTextComponent"]` — and
+// X's article page has NO <article> element, so selectors must NOT be scoped
+// under `article`. Lead with the clean rich-text node (excludes the feed-post
+// engagement chrome the <main> fallback sweeps in), then widen to the read-view
+// wrappers, then keep stale-testid guesses for forward-resilience; <main> is the
+// ultimate fallback downstream.
+const X_ARTICLE_SELECTORS = [
+  '[data-testid="longformRichTextComponent"]',
+  '[data-testid="twitterArticleRichTextView"]',
+  '[data-testid="twitterArticleReadView"]',
+  '[data-testid="twitterArticleRichText"]',
+  'div[role="article"]',
+];
+const X_ARTICLE_TITLE_SELECTORS = [
+  '[data-testid="twitter-article-title"]',
+  '[data-testid="twitterArticleTitle"]',
+  'h1',
+];
+
+// Serialize an X Article's Draft.js rich text to Markdown IN-PAGE. `.innerText`
+// (what the generic body cascade uses) flattens headings/lists/links/code to
+// plain paragraphs and drops every <img> — so the local copy loses structure
+// AND images never reach asset_download. This walks the article's top-level
+// blocks (paragraph = div.longform-unstyled, heading = section>h2, code =
+// section>pre, list = ul/ol, image = wrapper>img) and emits real Markdown,
+// upgrading twimg `name=small` thumbnails to `name=large` for full-res. The
+// returned `![](url)` refs are localized by the backfill-assets ingest step.
+async function extractXArticleBody(page) {
+  return await page.evaluate(() => {
+    const root = document.querySelector('[data-testid="longformRichTextComponent"]');
+    if (!root) return "";
+    const upgrade = (src) => {
+      try {
+        const u = new URL(src);
+        if (/(^|\.)twimg\.com$/.test(u.hostname) && u.searchParams.get("name")) {
+          u.searchParams.set("name", "large");
+          return u.toString();
+        }
+      } catch { /* not an absolute URL — leave as-is */ }
+      return src;
+    };
+    const inlineMd = (el) => {
+      let s = "";
+      el.childNodes.forEach((c) => {
+        if (c.nodeType === 3) { s += c.textContent; return; }
+        if (c.nodeType !== 1) return;
+        const t = c.tagName.toLowerCase();
+        if (t === "a") {
+          const txt = inlineMd(c).trim();
+          const href = c.getAttribute("href") || "";
+          s += txt ? (href ? `[${txt}](${href})` : txt) : "";
+        } else if (t === "strong" || t === "b") {
+          s += `**${inlineMd(c)}**`;
+        } else if (t === "em" || t === "i") {
+          s += `*${inlineMd(c)}*`;
+        } else if (t === "code") {
+          s += "`" + (c.textContent || "") + "`";
+        } else if (t === "br") {
+          s += "\n";
+        } else if (t === "img") {
+          /* block-level; handled by the walker below */
+        } else {
+          s += inlineMd(c);
+        }
+      });
+      return s;
+    };
+    // Draft.js nests the actual blocks under a <div data-contents="true">
+    // wrapper; iterate THAT container's children, not root's single wrapper.
+    const container = root.querySelector('[data-contents="true"]') || root;
+    const out = [];
+    for (const block of container.children) {
+      const h = block.querySelector("h1, h2, h3");
+      const pre = block.querySelector("pre");
+      const isList = block.tagName === "UL" || block.tagName === "OL";
+      const imgs = block.querySelectorAll("img");
+      if (h) {
+        const lvl = h.tagName === "H1" ? "#" : h.tagName === "H2" ? "##" : "###";
+        const txt = inlineMd(h).trim();
+        if (txt) out.push(`${lvl} ${txt}`, "");
+      } else if (pre) {
+        out.push("```", (pre.textContent || "").replace(/\n+$/, ""), "```", "");
+      } else if (isList) {
+        const ordered = block.tagName === "OL";
+        let i = 1;
+        block.querySelectorAll("li").forEach((li) => {
+          const txt = inlineMd(li).trim();
+          if (txt) out.push(ordered ? `${i++}. ${txt}` : `- ${txt}`);
+        });
+        out.push("");
+      } else if (imgs.length) {
+        imgs.forEach((im) => {
+          const src = im.getAttribute("src");
+          if (src) out.push(`![](${upgrade(src)})`, "");
+        });
+      } else {
+        const txt = inlineMd(block).trim();
+        if (txt) out.push(txt, "");
+      }
+    }
+    return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  });
+}
+
 const MAX_CAROUSEL_PAGES = 30; // safety cap; LinkedIn caps carousels at ~20
 
 async function main() {
@@ -134,6 +239,19 @@ async function main() {
     console.error("  --cdp-port N   port for --cdp-attach (default 9222)");
     process.exit(2);
   }
+  // X-Article detection. When the URL is an x.com/i/article/<id> (or the
+  // legacy twitter.com host), we drive a pre-seeded X session instead of
+  // LinkedIn: the X cookie was imported into the shared persistent profile
+  // by scripts/x-cookie-import.js (marker .athena-x-auth-confirmed). X blocks
+  // automated login, so there is no interactive login flow for this path —
+  // we require the marker to already exist and bail otherwise.
+  const isXArticle = /(?:twitter|x)\.com\/i\/article\//i.test(url || "");
+  const X_MARKER = path.join(AUTH_DIR, ".athena-x-auth-confirmed");
+  if (isXArticle && !fs.existsSync(X_MARKER)) {
+    console.error("No X session — run scripts/x-cookie-import.js first. Skipping.");
+    process.exit(1);   // kb-capture falls back to the syndication preview
+  }
+
   // --setup is sugar for "open the login flow without trying to capture
   // anything". Reuses the existing first-run login path by navigating to
   // the LinkedIn login page; user logs in, presses Enter, marker file
@@ -263,7 +381,14 @@ async function main() {
     // --setup explicitly requests the login flow (re-auth or first-time);
     // --headed forces a visible browser for debugging; missing marker means
     // we've never logged in here. Any of these triggers the login UI.
-    const needsLogin = !fs.existsSync(AUTH_CONFIRMED_MARKER) || headedFlag || setupFlag;
+    //
+    // X-Article path NEVER triggers the LinkedIn login flow: the X cookie is
+    // pre-seeded by scripts/x-cookie-import.js (X blocks automated login), and
+    // the .athena-x-auth-confirmed marker was already verified above. Force
+    // needsLogin false so we launch headless and skip straight to navigation.
+    const needsLogin =
+      !isXArticle &&
+      (!fs.existsSync(AUTH_CONFIRMED_MARKER) || headedFlag || setupFlag);
 
     const firstRun = needsLogin;
     if (firstRun && !fs.existsSync(path.join(AUTH_DIR, "Default"))) {
@@ -348,7 +473,23 @@ async function main() {
   // Extra settle time for LinkedIn's progressive hydration
   await page.waitForTimeout(3000);
 
-  const pageTitle = await page.title();
+  let pageTitle = await page.title();
+  // X Articles: the <title> is the generic "X" / handle chrome, not the
+  // article headline. Prefer the in-DOM article title selectors; fall
+  // through to the page.title() value above if none match.
+  if (isXArticle) {
+    for (const sel of X_ARTICLE_TITLE_SELECTORS) {
+      try {
+        const t = await page.locator(sel).first().innerText({ timeout: 2000 });
+        if (t && t.trim().length > 0) {
+          pageTitle = t.trim();
+          break;
+        }
+      } catch {
+        /* try next title selector */
+      }
+    }
+  }
   console.error(`  Page title: ${pageTitle}`);
 
   // Initial scrape (handles non-carousel posts naturally)
@@ -407,7 +548,22 @@ async function main() {
   //   3. <main>.innerText (kitchen-sink fallback, relies on chrome strip)
   let body = "";
   let extractedVia = "";
-  for (const sel of POST_BODY_SELECTORS) {
+
+  // X Articles: prefer the structured Markdown serializer (preserves
+  // headings/lists/links/code + inline images). Falls through to the generic
+  // innerText cascade below if the longform container isn't found.
+  if (isXArticle) {
+    try {
+      const md = await extractXArticleBody(page);
+      if (md && md.length > 50) {
+        body = md;
+        extractedVia = 'dom: longform Markdown (structured)';
+      }
+    } catch { /* fall through to the innerText cascade */ }
+  }
+
+  const bodySelectors = isXArticle ? X_ARTICLE_SELECTORS : POST_BODY_SELECTORS;
+  for (const sel of (body ? [] : bodySelectors)) {
     try {
       const text = await page.locator(sel).first().innerText({ timeout: 2000 });
       if (text && text.length > 50) {
@@ -641,7 +797,7 @@ async function main() {
     `tags:\n` +
     `  - "clippings"\n` +
     `---\n\n` +
-    `## Feed post\n\n` +
+    `${isXArticle ? "" : "## Feed post\n\n"}` +
     `${body}\n\n` +
     `${imageMd}\n` +
     `${commentsMd}`;

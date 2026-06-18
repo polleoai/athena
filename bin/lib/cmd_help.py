@@ -42,6 +42,7 @@ Commands:
   kb report-bug "desc"       Report a bug to upstream Athena repo
   kb request-feature "desc"  Submit a feature request
   kb lint                   Health check — find broken links, orphans, tag issues
+  kb doctor                 Check your Python/deps/node against the supported matrix
   kb list                   List all wiki pages
   kb list --insights        List insight pages
   kb list --topics          List topic pages

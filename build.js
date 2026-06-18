@@ -55,6 +55,9 @@ const manifestDst = ".obsidian/plugins/athena/manifest.json";
 const PY_SRC_DIRS = [
   ["bin/lib",    ".obsidian/plugins/athena/bin/lib"],
   ["bin/config", ".obsidian/plugins/athena/bin/config"],
+  // Web Clipper templates the setup wizard delivers to the user (resolved via
+  // resolvePythonScript, which works for any bundled relative path).
+  ["assets/web-clipper", ".obsidian/plugins/athena/assets/web-clipper"],
 ];
 
 function copyDirRecursive(src, dst) {

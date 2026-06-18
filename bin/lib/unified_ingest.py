@@ -298,6 +298,32 @@ def _handle_webpage_from_markdown_body(
         if article_title:
             title = article_title
 
+    # Localize inline images BEFORE the twimg rewrite, for the capture paths
+    # that carry markdown `![](url)` image refs: `deep-capture` (capture-deep's
+    # X Article body) and `web-clipper-social` (the Web Clipper's X-Article /
+    # LinkedIn clips, whose `{{selectorHtml|markdown}}` emits the same refs).
+    # asset_download matches ONLY markdown `![]()`, so it must run while the
+    # refs are still markdown — `_rewrite_twimg_images` below turns them into
+    # remote `<img>` tags it can no longer match. Other ingest paths stay
+    # byte-identical; the derived slug is threaded into write_raw via
+    # slug_override so assets land under raw/assets/<slug>/ matching the raw.
+    _LOCALIZE_VIA = ("deep-capture", "web-clipper-social")
+    asset_slug = None
+    if ((input.clipped_via or "") in _LOCALIZE_VIA
+            and not os.environ.get("ATHENA_SKIP_ASSETS")):
+        try:
+            from slug import derive_slug, SlugDerivationError
+            from asset_download import download_assets
+            try:
+                asset_slug = derive_slug("webpages", canonical_url, title)
+            except SlugDerivationError:
+                asset_slug = None
+            if asset_slug:
+                body = download_assets(body, asset_slug, input.vault_root)
+        except Exception as exc:  # noqa: BLE001 — localization is best-effort
+            print(f"[unified_ingest] asset localize failed: {exc}",
+                  file=sys.stderr)
+
     # Image + video URL cleanup. No-op on bodies without those patterns.
     body = _rewrite_twimg_images(body)
     body = _strip_blob_videos(body, source_url=canonical_url)
@@ -332,6 +358,7 @@ def _handle_webpage_from_markdown_body(
             body=body,
             extra=extra,
             canonicalize_url=False,  # already canonicalized in ingest()
+            slug_override=asset_slug,  # match the asset dir localized above
         )
     except Exception as exc:  # raw_writer surfaces RawWriterError + degraded
         raise UnifiedIngestError(

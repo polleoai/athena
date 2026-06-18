@@ -148,6 +148,19 @@ def article_title(data: dict) -> str:
     return ((data.get("article") or {}).get("title") or "").strip()
 
 
+def is_x_article(data: dict) -> bool:
+    """True if this syndication payload is a long-form X Article."""
+    return bool((data or {}).get("article"))
+
+
+def article_url(data: dict) -> str | None:
+    """The canonical x.com/i/article/<id> URL for an X Article, else None.
+    Mirrors the id derivation in _article_body."""
+    art = (data or {}).get("article") or {}
+    art_id = art.get("rest_id") or art.get("id")
+    return f"https://x.com/i/article/{art_id}" if art_id else None
+
+
 def _article_body(url: str, data: dict, byline: str) -> str:
     """Markdown body for a long-form X Article. The full article body is
     JS-rendered and not exposed over plain HTTP, so we capture the real title,
@@ -157,8 +170,8 @@ def _article_body(url: str, data: dict, byline: str) -> str:
     preview = (art.get("preview_text") or "").strip()
     cover = (((art.get("cover_media") or {}).get("media_info") or {})
              .get("original_img_url"))
-    art_id = art.get("rest_id") or art.get("id")
-    article_url = f"https://x.com/i/article/{art_id}" if art_id else url
+    _au = article_url(data)
+    article_url_str = _au or url
 
     body = [f"# {title}", ""]
     if byline:
@@ -171,7 +184,7 @@ def _article_body(url: str, data: dict, byline: str) -> str:
         body.append(preview)
         body.append("")
     body.append(f"> This is a long-form X Article. Read the full piece: "
-                f"[{article_url}]({article_url})")
+                f"[{article_url_str}]({article_url_str})")
     return "\n".join(body)
 
 

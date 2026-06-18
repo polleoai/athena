@@ -31,6 +31,7 @@ import cmd_config
 import cmd_create
 import cmd_delete
 import cmd_detach
+import cmd_doctor
 import cmd_entities
 import cmd_export
 import cmd_help
@@ -170,6 +171,7 @@ PORTED: Dict[str, Handler] = {
     "query": cmd_query.handle,
     "trash": cmd_trash.handle,
     "index": cmd_index.handle,
+    "doctor": cmd_doctor.handle,
     "lint": cmd_lint.handle,
     "remove": cmd_remove.handle,
     "delete": cmd_delete.handle,

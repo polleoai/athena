@@ -571,24 +571,75 @@ const _BROWSER_EXTRACT_JS = `
 `;
 
 let _pythonCmd = null;
+let _pythonValidated = false;  // true iff pythonCmd() found a candidate that
+                               // passed validation (vs. falling back to a
+                               // default that may not work) — drives the
+                               // load-time "run kb doctor --fix" guidance.
+
+// Validate an interpreter can actually run Athena's ingest: Python >= 3.11
+// (arcus floor) AND a working pydantic/pydantic-core pairing. The second check
+// matters because Obsidian launches from a minimal GUI PATH and may resolve a
+// `python3` that is too old OR has a corrupt pydantic install (witnessed:
+// host python3.14 with pydantic-core mismatch) — which silently breaks clip
+// ingest. An absolute-path candidate (the ~/.athena/venv interpreter) bypasses
+// the PATH problem entirely.
+function _pythonInterpreterWorks(cmd) {
+  try {
+    // Short timeout: `python -c "import pydantic"` is fast; a missing
+    // interpreter ENOENTs instantly. The cap only bounds a hung interpreter,
+    // and pythonCmd() runs this synchronously on the UI thread, so keep it
+    // small (worst case ~3s × candidates, once, cached thereafter).
+    execFileSync(cmd,
+      ["-c", "import sys; assert sys.version_info >= (3, 11); import pydantic"],
+      { stdio: "ignore", timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Candidate interpreters, best first. ATHENA_PYTHON (explicit override) wins if
+// it works; then Athena's own venv (absolute path — immune to the GUI PATH gap);
+// then versioned names; then bare python3/python.
+function _pythonCandidates() {
+  const home = os.homedir();
+  const win = process.platform === "win32";
+  const candidates = [];
+  if (process.env.ATHENA_PYTHON) candidates.push(process.env.ATHENA_PYTHON);
+  candidates.push(win
+    ? path.join(home, ".athena", "venv", "Scripts", "python.exe")
+    : path.join(home, ".athena", "venv", "bin", "python"));
+  candidates.push(...(win
+    ? ["python", "py"]
+    : ["python3.13", "python3.12", "python3.11", "python3"]));
+  return candidates;
+}
+
+const _PY_VALIDATE_ARGS = ["-c", "import sys; assert sys.version_info >= (3, 11); import pydantic"];
+
 function pythonCmd() {
   if (_pythonCmd) return _pythonCmd;
-  // ATHENA_PYTHON overrides the interpreter kb runs under. This matters when the
-  // default `python3` is older than 3.11 (the floor for arcus, which powers URL
-  // ingest): a user — or the VM net-test bootstrap — can point kb at a newer
-  // interpreter without touching the system python. Behaviour-neutral if unset.
-  if (process.env.ATHENA_PYTHON) {
-    _pythonCmd = process.env.ATHENA_PYTHON;
-  } else if (process.platform === "win32") {
-    // On Windows, prefer plain `python` (the canonical install). The
-    // Windows Python launcher `py.exe` accepts `-3` as an arg form but
-    // we don't want the indirection — if `python` isn't on PATH, the
-    // spawn will ENOENT with a message that points the user at install.
-    _pythonCmd = "python";
-  } else {
-    _pythonCmd = "python3";
+  // We pick the first candidate that PASSES validation rather than blindly
+  // trusting `python3`, so a broken/too-old host interpreter no longer breaks
+  // ingest. NOTE: this is synchronous (callers need the path before spawning);
+  // the load-time preflight uses the async variant so it never blocks the UI.
+  const win = process.platform === "win32";
+  for (const c of _pythonCandidates()) {
+    if (_pythonInterpreterWorks(c)) { _pythonCmd = c; _pythonValidated = true; return _pythonCmd; }
   }
+  // Nothing validated — fall back to the configured/default so the eventual
+  // spawn error is actionable rather than silent. _pythonValidated stays false
+  // so the plugin can surface the "run kb doctor --fix" guidance.
+  _pythonValidated = false;
+  _pythonCmd = process.env.ATHENA_PYTHON || (win ? "python" : "python3");
   return _pythonCmd;
+}
+
+// Returns true iff pythonCmd() resolved to an interpreter that PASSED
+// validation. Triggers resolution (cached) on first call.
+function pythonInterpreterValidated() {
+  pythonCmd();
+  return _pythonValidated;
 }
 
 // Resolve a path to one of Athena's bundled Python sources. As of 1.0.9
@@ -696,6 +747,15 @@ const athenaKbAutocompleteSource = {
 class AthenaPlugin extends Plugin {
   async onload() {
     console.log("[athena] Plugin loaded \u2014 version", (this.manifest && this.manifest.version) || "?");
+
+    // Default settings SYNCHRONOUSLY before any await below. runMechanical
+    // (and other methods) are reachable via window.app the instant the plugin
+    // object exists \u2014 e.g. a fast command, or a vm-test spec \u2014 which can land
+    // during onload's async init (notably the `await disableFn` / loadSettings
+    // gap on a slow guest). Without this, `this.settings` is undefined and
+    // runMechanical throws on `this.settings.connectionTimeoutMs`. loadSettings()
+    // below refines this with persisted values.
+    this.settings = Object.assign({}, DEFAULT_SETTINGS);
 
     // Mutual exclusivity: Athena includes all Gryphon features, disable
     // Gryphon if enabled. Use disablePluginAndSave so the change persists
@@ -1018,6 +1078,66 @@ class AthenaPlugin extends Plugin {
     // Watchdog — initial check shortly after UI loads + periodic
     setTimeout(() => this._watchdogCheck(), 5000);
     this._watchdogInterval = setInterval(() => this._watchdogCheck(), 60000);
+
+    // Environment preflight — if no working Python interpreter validated,
+    // surface the one-command fix instead of letting the first clip fail with
+    // a cryptic spawn error. One-time, non-blocking.
+    setTimeout(() => this._warnIfPythonBroken(), 7000);
+  }
+
+  /** Obtain an Athena view to ingest a clip into, opening the panel if needed
+   *  but BOUNDING the auto-open attempts per clip. A vault where activateView
+   *  can't place a leaf would otherwise re-open + retry every 60s forever. After
+   *  the cap we stop forcing the panel open (we still use one if the user opens
+   *  it) and surface a single Notice. Returns the view or null. */
+  async _tryOpenViewForClip(filePath) {
+    let view = this._getActiveView();
+    if (view) return view;
+    if (!this._clipOpenTries) this._clipOpenTries = new Map();
+    const tries = this._clipOpenTries.get(filePath) || 0;
+    if (tries < 3) {
+      this._clipOpenTries.set(filePath, tries + 1);
+      try { await this.activateView(); } catch {}
+      return this._getActiveView();
+    }
+    if (!this._clipOpenWarned) {
+      this._clipOpenWarned = true;
+      new Notice("Athena: open the Athena panel to finish processing saved clips.", 10000);
+    }
+    return null;
+  }
+
+  /** One-time Notice when no validated Python interpreter was found, pointing
+   *  the user at `kb doctor --fix`. Validates ASYNCHRONOUSLY so it never blocks
+   *  the UI thread — the synchronous probe in pythonCmd() could otherwise stall
+   *  rendering on a slow/broken-python machine if it ran here. Fires at most once. */
+  async _warnIfPythonBroken() {
+    if (this._pythonWarned) return;
+    try {
+      if (await this._anyValidatedPythonAsync()) return;  // a good interpreter exists
+      if (this._pythonWarned) return;
+      this._pythonWarned = true;
+      new Notice(
+        "Athena: no working Python found (need 3.11+ with arcus/pydantic). " +
+        "Run `kb doctor --fix` in a terminal, or set ATHENA_PYTHON.",
+        15000,
+      );
+    } catch { /* preflight is best-effort */ }
+  }
+
+  /** Async (non-UI-blocking) probe: does any candidate interpreter validate
+   *  (Python >= 3.11 + importable pydantic)? Mirrors pythonCmd()'s candidate
+   *  list but uses async execFile so it never freezes the renderer. */
+  async _anyValidatedPythonAsync() {
+    for (const c of _pythonCandidates()) {
+      const ok = await new Promise((resolve) => {
+        try {
+          execFile(c, _PY_VALIDATE_ARGS, { timeout: 3000 }, (err) => resolve(!err));
+        } catch { resolve(false); }
+      });
+      if (ok) return true;
+    }
+    return false;
   }
 
   async onunload() {
@@ -3170,12 +3290,19 @@ ${taggingRules ? `- tags: follow these tagging rules:\n${taggingRules}` : "- tag
   /** Shared clip processing for both initial watcher and watchdog retry. */
   async _handleClipFile(clipDir, filename, filePath) {
     try {
-      const view = this._getActiveView();
+      let view = this._getActiveView();
       if (!view) {
-        new Notice(`Athena: Clip saved \u2014 open Athena to process.`);
+        // No Athena panel open \u2014 open one so the clip ingests now instead of
+        // waiting for the user to notice. Bounded auto-open (see helper).
+        new Notice(`Athena: Clip saved \u2014 processing\u2026`);
+        view = await this._tryOpenViewForClip(filePath);
+      }
+      if (!view || view.isStreaming) {
+        // Couldn't ingest right now \u2014 un-mark so the 60s watchdog retries
+        // when a view exists, instead of stranding the clip until a reload.
+        if (this._processedClips) this._processedClips.delete(filePath);
         return;
       }
-      if (view.isStreaming) return;
 
       let clipUrl = "", clipContent = "";
       try {
@@ -3422,8 +3549,21 @@ ${taggingRules ? `- tags: follow these tagging rules:\n${taggingRules}` : "- tag
     setTimeout(async () => {
       try {
         if (!fs.existsSync(filePath)) return;
-        const view = this._getActiveView();
-        if (!view || view.isStreaming) return;
+        let view = this._getActiveView();
+        if (!view) {
+          // No Athena panel open — clips arrive while the user is in their
+          // browser, not focused on Athena. Try to open the view, but bound the
+          // auto-open attempts so a vault where activateView can't place a leaf
+          // doesn't churn forever (see _tryOpenViewForClip).
+          view = await this._tryOpenViewForClip(filePath);
+        }
+        if (!view || view.isStreaming) {
+          // Couldn't get a usable view (open failed/capped, or a turn is
+          // mid-stream). Un-mark so a later tick retries when a view exists —
+          // otherwise the clip is stranded in _processedClips until reload.
+          this._processedClips.delete(filePath);
+          return;
+        }
         console.log("[athena] watchdog: processing clip", filename);
 
         // Watchdog uses a simpler finalization (shorter messages)
