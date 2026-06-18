@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Athena — Web Page",
+  "behavior": "create",
+  "noteContentFormat": "{{content}}",
+  "properties": [
+    { "name": "title", "value": "{{title}}", "type": "text" },
+    { "name": "source", "value": "{{url}}", "type": "text" },
+    { "name": "clipped_via", "value": "web-clipper", "type": "text" },
+    { "name": "author", "value": "{{author}}", "type": "text" },
+    { "name": "clipped_at", "value": "{{time|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}", "type": "datetime" }
+  ],
+  "triggers": [],
+  "noteNameFormat": "{{title|safe_name}}",
+  "path": "inbox/Clippings"
+}

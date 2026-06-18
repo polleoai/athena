@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Athena — LinkedIn",
+  "behavior": "create",
+  "noteContentFormat": "{{selectorHtml:.feed-shared-update-v2 .update-components-text|markdown}}\n\n{{selectorHtml:.feed-shared-update-v2 .update-components-article|markdown}}",
+  "properties": [
+    { "name": "title", "value": "{{title}}", "type": "text" },
+    { "name": "source", "value": "{{url}}", "type": "text" },
+    { "name": "clipped_via", "value": "web-clipper-social", "type": "text" },
+    { "name": "author", "value": "{{selector:.update-components-actor__name|trim}}", "type": "text" },
+    { "name": "clipped_at", "value": "{{time|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}", "type": "datetime" }
+  ],
+  "triggers": ["https://www.linkedin.com/posts", "https://www.linkedin.com/feed"],
+  "noteNameFormat": "{{title|safe_name}}",
+  "path": "inbox/Clippings"
+}
