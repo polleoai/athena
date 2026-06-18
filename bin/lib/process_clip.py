@@ -137,6 +137,61 @@ def _run_capture_deep(url: str, vault_root: Path) -> Path | None:
     return new_path
 
 
+def _is_x_status_url(url: str) -> bool:
+    """True if `url` is an x.com/twitter /status/ (tweet) URL."""
+    import fetch_tweet
+    return fetch_tweet.parse_status_url(url or "") is not None
+
+
+def _should_resync_tweet(canonical_url: str, fm: dict) -> bool:
+    """A Web-Clipper clip whose source is an x.com/twitter /status/ URL.
+
+    The Web Clipper's DOM scrape of tweets is unreliable — it yields an empty
+    body or unrelated timeline fragments, and many "tweets" are actually
+    long-form X Articles whose body isn't on the /status/ page at all. So we
+    discard the scraped body and re-capture via the syndication CDN (and
+    auto-promote article-tweets to capture-deep), exactly like `kb add <url>`.
+    Disabled via ATHENA_DISABLE_TWEET_RESYNC (tests / offline)."""
+    if os.environ.get("ATHENA_DISABLE_TWEET_RESYNC"):
+        return False
+    via = (fm.get("clipped_via") or "").strip()
+    if via not in ("web-clipper", "web-clipper-social"):
+        return False
+    return _is_x_status_url(canonical_url)
+
+
+def _resync_tweet_clip(canonical_url: str, vault_root: Path) -> Path | None:
+    """Re-capture an x.com /status/ Web-Clipper clip via syndication.
+
+    Returns a clip path to process in place of the original — the syndication
+    raw for a tweet, or the capture-deep clip for an article-tweet — or None to
+    fall through to the original (thin) clip body when re-capture isn't possible
+    (deleted/protected tweet, offline, or a login-gated article with no session).
+    """
+    import tempfile
+    import fetch_tweet
+    parsed = fetch_tweet.parse_status_url(canonical_url)
+    if not parsed:
+        return None
+    _handle, tweet_id = parsed
+    data = fetch_tweet.fetch_tweet_json(tweet_id)
+    if not data:
+        return None
+    if fetch_tweet.is_x_article(data):
+        art_url = fetch_tweet.article_url(data)
+        if not art_url:
+            return None
+        return _run_capture_deep(art_url, vault_root)  # full login-gated body
+    # Regular tweet → syndication raw written to a temp clip for processing.
+    raw_md = fetch_tweet.build_raw(canonical_url, data)
+    if not raw_md or not raw_md.strip():
+        return None
+    fd, tmp = tempfile.mkstemp(suffix=".md", prefix="athena-tweet-resync-")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(raw_md)
+    return Path(tmp)
+
+
 # Bait titles that the Web Clipper extracts from chrome-stripped page
 # titles (every LinkedIn post has `<title>Post | LinkedIn</title>`,
 # so propagating that verbatim creates collision-bait raw titles).
@@ -911,6 +966,32 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     # one-time setup action so the user knows they're getting a thin
     # capture (Web Clipper) when they could have a rich one (capture-deep).
     _warn_if_setup_needed(canonical, fm, clip.name)
+
+    # X /status/ Web-Clipper clips: the clipper's tweet DOM scrape is
+    # unreliable (empty body / timeline garbage) and can't reach article
+    # bodies. Re-capture via the syndication CDN — auto-promoting
+    # article-tweets to capture-deep — and discard the scraped body. Mirrors
+    # the LinkedIn promote pattern above; independent because x.com is not in
+    # _PLAYWRIGHT_DOMAINS.
+    if _should_resync_tweet(canonical, fm):
+        resync_clip = _resync_tweet_clip(canonical, Path(vault_root))
+        if resync_clip is not None:
+            try:
+                raw_path = process_clip(resync_clip, vault_root)
+            finally:
+                # Drop the temp syndication clip we created; article deep clips
+                # live in clippings/ and are cleaned up by the watcher.
+                if "athena-tweet-resync-" in resync_clip.name:
+                    try:
+                        resync_clip.unlink()
+                    except OSError:
+                        pass
+            try:
+                clip.unlink()  # remove the Web Clipper trigger clip
+            except OSError:
+                pass
+            return raw_path
+        # syndication failed — fall through to the clipper body (thin but real)
 
     # Body must include the actual page content. Web Clipper concatenates
     # everything below the frontmatter into the body. unified_ingest's

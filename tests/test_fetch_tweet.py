@@ -174,5 +174,23 @@ class SecurityHardening(unittest.TestCase):
             ft.parse_status_url("https://mobile.twitter.com/u/status/9"), ("u", "9"))
 
 
+class ArticleUrlHelpers(unittest.TestCase):
+    def test_is_x_article_true_for_article(self):
+        self.assertTrue(ft.is_x_article(ARTICLE_FIXTURE))
+
+    def test_is_x_article_false_for_plain_tweet(self):
+        self.assertFalse(ft.is_x_article(TWEET_FIXTURE))
+
+    def test_article_url_from_rest_id(self):
+        self.assertEqual(
+            ft.article_url(ARTICLE_FIXTURE),
+            "https://x.com/i/article/" + str(
+                (ARTICLE_FIXTURE["article"].get("rest_id")
+                 or ARTICLE_FIXTURE["article"].get("id"))))
+
+    def test_article_url_none_for_plain_tweet(self):
+        self.assertIsNone(ft.article_url(TWEET_FIXTURE))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,27 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.4.0] — 2026-06-17
+
+Headline: **setup heals itself and X Articles capture in full.** A new `kb doctor` checks and repairs your environment in one command, the bundled assistant auto-selects a working CLI instead of hanging on a stale one, and a curated set of Web Clipper templates makes browser capture land cleanly. Bundles **Gryphon 2.4.3**.
+
+### Added
+
+- **`kb doctor` — one-command environment check and repair.** `kb doctor` validates your Python and dependencies by actually importing them — not by trusting version numbers, which can lie when two installs shadow each other — and reports exactly what's wrong. `kb doctor --fix` provisions an isolated, self-consistent environment that Athena uses automatically, leaving your system Python untouched. If no working Python is found at startup, the plugin now surfaces a one-line pointer to the fix instead of failing silently. A declared support matrix (Python 3.11+, no upper cap) documents what each release targets.
+- **Athena Web Clipper templates.** A curated template set for the official Obsidian Web Clipper — general pages, LinkedIn, X/Twitter posts, and X Articles — now ships with the plugin. Clips arrive tagged with the right title, source URL, and capture method so Athena ingests them cleanly instead of guessing.
+- **Full X Article capture.** Long-form X (Twitter) Articles now capture with their real structure — headings, lists, and inline images saved locally — instead of a flattened, image-less preview.
+
+### Changed
+
+- **Vendored Gryphon → 2.4.3.** The embedded assistant now picks a working command-line tool (Claude / Codex / Gemini) by probing versions and choosing the newest valid one — healing itself when a stale tool happens to be found first on the system. This fixes first-run chat hangs that previously surfaced only as a 90-second connection timeout. When no usable tool exists, it now fails in about a second with a clear, actionable message instead of hanging.
+
+### Fixed
+
+- **Picks a working Python.** Athena now selects a Python interpreter that actually runs its dependencies, instead of blindly using whichever `python3` the system resolves first — important when a system Python is broken, shadowed, or too new for an installed package set.
+- **Clips ingest even when the panel is closed.** A web clip is now picked up and turned into a page whether or not the Athena panel is open.
+- **X/Twitter capture.** Tweets re-sync through the reliable syndication path (a brittle page selector was dropped); handle-based Article URLs (`/<handle>/article/…`) are now recognized; image-heavy social clips keep their images locally.
+- **Windows stability.** Settings are initialized before the first command can race them, and the startup environment check runs without blocking the interface on slower machines.
+
 ## [1.3.0] — 2026-06-15
 
 Headline: **GitHub repos and X/Twitter posts now capture cleanly** with purpose-built extractors instead of the generic page reader, and Athena runs correctly on **native Windows**. Bundles **Gryphon 2.4.0**.

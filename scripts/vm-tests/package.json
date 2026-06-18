@@ -1,0 +1,17 @@
+{
+  "name": "@athena/vm-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Athena cross-platform tests via Argus (0.12.0; OR-9 fix requires >= 0.11.1). Host smoke via `npm run test:host`; VM matrix via `npx argus vm-run` (shipped orchestrator OR-1 + runner OR-3); shared obsidianSpec fixture (OR-9, playwrightTest injection). Issues #183/#184/#185.",
+  "scripts": {
+    "test:host": "playwright test",
+    "test:host:net": "RUN_NET_TESTS=1 playwright test",
+    "test:vm": "argus vm-run --no-build",
+    "test:vm:net": "RUN_NET_TESTS=1 argus vm-run --no-build"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.45.0",
+    "@shared/argus": "file:../../../../Projects/argus",
+    "playwright": "^1.45.0"
+  }
+}
