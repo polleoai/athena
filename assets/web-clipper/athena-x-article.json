@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Athena — X Article",
+  "behavior": "create",
+  "noteContentFormat": "{{selectorHtml:[data-testid=\"longformRichTextComponent\"]|markdown}}",
+  "properties": [
+    { "name": "title", "value": "{{selector:[data-testid=\"twitter-article-title\"]|trim}}", "type": "text" },
+    { "name": "source", "value": "{{url}}", "type": "text" },
+    { "name": "clipped_via", "value": "web-clipper-social", "type": "text" },
+    { "name": "author", "value": "{{selector:[data-testid=\"User-Name\"]|first|trim}}", "type": "text" },
+    { "name": "clipped_at", "value": "{{time|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}", "type": "datetime" }
+  ],
+  "triggers": ["/^https:\\/\\/(x|twitter)\\.com\\/[^\\/]+\\/article\\//", "https://x.com/i/article/", "https://twitter.com/i/article/"],
+  "noteNameFormat": "{{title|safe_name}}",
+  "path": "inbox/Clippings"
+}
