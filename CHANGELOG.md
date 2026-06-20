@@ -2,6 +2,18 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.4.2] — 2026-06-20
+
+Headline: **switching your AI provider or model now takes effect on your next message.** Changing the provider (Claude → Codex / Gemini), model, reasoning effort, or permission mode in Athena's settings used to relabel the toolbar while the next message was still answered by the previously-running provider — so a switch made to work around one provider's usage limit was silently ignored. That's fixed. Bundles **Gryphon 2.4.5**.
+
+### Fixed
+
+- **Provider and model switches take effect on your next message.** When you change the AI provider, model, reasoning effort, or permission mode from Athena's settings, the chat now retires the active session so your new choice is the one that answers — instead of quietly continuing with the previous provider. The settings notice now says so plainly ("takes effect on your next message") instead of telling you to reopen the tab.
+
+### Changed
+
+- **Vendored Gryphon → 2.4.5.** Picks up the provider/model-switch fix above, plus a release-packaging fix so the bundled assistant always ships its current code rather than a stale build.
+
 ## [1.4.0] — 2026-06-17
 
 Headline: **setup heals itself and X Articles capture in full.** A new `kb doctor` checks and repairs your environment in one command, the bundled assistant auto-selects a working CLI instead of hanging on a stale one, and a curated set of Web Clipper templates makes browser capture land cleanly. Bundles **Gryphon 2.4.3**.
