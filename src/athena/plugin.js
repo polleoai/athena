@@ -3669,15 +3669,15 @@ class AthenaSettingTab extends PluginSettingTab {
           .onChange(async (v) => { this.plugin.settings.claudePath = v; await this.plugin.saveSettings(); });
       });
 
-    // Helper for #122: GryphonChatView caches settings at construction, so
-    // changing provider/model/effort/permissionMode doesn't refresh the
-    // running view's badges or spawn options. Until Gryphon implements
-    // reactive settings (polleoai/gryphon#40), we surface a Notice telling
-    // the user how to apply the change without losing chat state.
+    // Helper for #122: as of Gryphon 2.4.4, GryphonChatView retires its live
+    // session whenever a spawn-time setting (provider/model/effort/permission)
+    // changes — driven by the gryphon:settings-changed event our saveSettings()
+    // fires (polleoai/gryphon#40). So the change now takes effect on the next
+    // message automatically; this Notice just confirms that to the user.
     const showRefreshNotice = (settingName) => {
       new Notice(
-        `${settingName} updated. Reopen the Athena chat tab to apply, or toggle the plugin off/on.`,
-        7000
+        `${settingName} updated — takes effect on your next message.`,
+        5000
       );
     };
 
