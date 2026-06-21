@@ -15,6 +15,15 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+# Self-heal a broken host interpreter BEFORE importing kb_dispatch (which pulls
+# pydantic). If the Python now running kb can't import pydantic but Athena's
+# controlled ~/.athena/venv can, re-exec into the venv so ingest works instead
+# of crashing deep in the pipeline. Covers the POSIX shebang path and any caller
+# that hands us a broken global python; no-op on a healthy/compiled interpreter.
+from interpreter_guard import maybe_reexec  # noqa: E402
+
+maybe_reexec()
+
 # Windows consoles default to a legacy code page (typically cp1252) that can't
 # encode the non-ASCII characters kb emits (e.g. the "->" arrow rendered as
 # U+2192 in "Trashed N file(s) -> .kb-trash/"), raising UnicodeEncodeError.

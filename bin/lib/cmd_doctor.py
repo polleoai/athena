@@ -40,6 +40,12 @@ def handle(argv: List[str], root: str) -> int:
     ok, message = supported.repair_into_venv(log=print)
     print()
     print(("✓ " if ok else "✗ ") + message)
+    if ok:
+        # The CLI self-heals into this venv (bin/kb re-execs when its own
+        # interpreter can't import pydantic) and the Obsidian plugin's
+        # pythonCmd() already prefers it — so there's nothing for the user to
+        # wire up. Set ATHENA_PYTHON only to override this choice.
+        print("  Athena will use this venv automatically — no further setup needed.")
     if not ok:
         print("  Manual fallback:")
         print(f"      {result['repair']}")
