@@ -2,6 +2,15 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.4.3] — 2026-06-21
+
+Headline: **capture and ingest keep working even when your system Python is broken.** If your computer's Python was missing a piece (a mismatched install — common after an OS or Homebrew update), clipping a page would silently do nothing: the clip landed but never became a note. Athena already builds its own clean, isolated Python when you run `kb doctor --fix` — but until now nothing actually used it for the command-line ingest. Now Athena detects a broken interpreter and automatically switches to its own healthy one, so capture and ingest just work. Bundles **Gryphon 2.4.5** (unchanged).
+
+### Fixed
+
+- **Ingest no longer dies on a broken system Python.** When the Python that Athena's `kb` commands run under can't load its dependencies (e.g. Homebrew Python 3.14 with a mismatched core library), Athena now automatically falls back to the clean, isolated Python it provisions via `kb doctor --fix` — instead of crashing partway through and leaving your clipped page unprocessed. This covers every path: the command line, the Obsidian plugin's auto-ingest, and deep web capture.
+- **`kb doctor --fix` now confirms the repair is wired up.** After it provisions the isolated Python, it tells you Athena will use it automatically — no manual environment variables to set.
+
 ## [1.4.2] — 2026-06-20
 
 Headline: **switching your AI provider or model now takes effect on your next message.** Changing the provider (Claude → Codex / Gemini), model, reasoning effort, or permission mode in Athena's settings used to relabel the toolbar while the next message was still answered by the previously-running provider — so a switch made to work around one provider's usage limit was silently ignored. That's fixed. Bundles **Gryphon 2.4.5**.
