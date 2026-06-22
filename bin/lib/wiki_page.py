@@ -1534,26 +1534,59 @@ def generate_page_index(vault_path):
 
 # ── Journal ──────────────────────────────────────────────────────
 
-def create_journal_entry(vault_path, text):
+def create_journal_entry(vault_path, text, project=None):
     """Append a timestamped journal entry. One file per day in wiki/journal/.
 
-    Returns { status, file_path, date }.
+    When ``project`` is falsy (the default) the behavior — output path,
+    frontmatter, and append format — is byte-identical to the legacy journal:
+    ``wiki/journal/Journal-<date>.md``.
+
+    When ``project`` is truthy, the day file is written under
+    ``wiki/journal/<safe(project)>/Journal-<date>.md`` with a ``project:`` line
+    added to the NEW-file frontmatter and the retrospective template
+    (Done/Data/Problems/Learnings/Tomorrow/KB-worthy) seeded BEFORE the first
+    timestamped entry.
+
+    Returns { status, file_path, date, project }.
     """
     if not text or not text.strip():
-        return {'status': 'empty', 'file_path': None, 'date': None}
+        return {'status': 'empty', 'file_path': None, 'date': None,
+                'project': project or None}
 
     today = time.strftime('%Y-%m-%d')
     now = time.strftime('%H:%M')
-    journal_dir = os.path.join(vault_path, 'wiki', 'journal')
+
+    if project:
+        # Sanitize the project name into a safe subdir component.
+        import sys as _sys
+        _lib = os.path.dirname(os.path.abspath(__file__))
+        if _lib not in _sys.path:
+            _sys.path.insert(0, _lib)
+        from wiki_writer import _safe_filename
+        safe_project = _safe_filename(project)
+        journal_dir = os.path.join(vault_path, 'wiki', 'journal', safe_project)
+    else:
+        journal_dir = os.path.join(vault_path, 'wiki', 'journal')
+
     os.makedirs(journal_dir, exist_ok=True)
     journal_file = os.path.join(journal_dir, f'Journal-{today}.md')
 
     # Create file with frontmatter if new
     if not os.path.exists(journal_file):
-        with open(journal_file, 'w', encoding='utf-8') as f:
-            f.write(f'---\ntitle: "Journal-{today}"\nsource_type: "topic"\n'
-                    f'date_added: {today}\nlast_updated: {today}\n'
-                    f'tags: [journal]\nrelated:\n---\n\n')
+        if project:
+            with open(journal_file, 'w', encoding='utf-8') as f:
+                f.write(f'---\ntitle: "Journal-{today}"\nsource_type: "topic"\n'
+                        f'date_added: {today}\nlast_updated: {today}\n'
+                        f'tags: [journal]\nproject: "{project}"\nrelated:\n---\n\n')
+                # Seed the retrospective template (empty H2 sections).
+                for section in ('Done', 'Data', 'Problems', 'Learnings',
+                                'Tomorrow', 'KB-worthy'):
+                    f.write(f'## {section}\n\n')
+        else:
+            with open(journal_file, 'w', encoding='utf-8') as f:
+                f.write(f'---\ntitle: "Journal-{today}"\nsource_type: "topic"\n'
+                        f'date_added: {today}\nlast_updated: {today}\n'
+                        f'tags: [journal]\nrelated:\n---\n\n')
 
     # Append entry
     with open(journal_file, 'a', encoding='utf-8') as f:
@@ -1561,21 +1594,46 @@ def create_journal_entry(vault_path, text):
 
     update_index_counts(vault_path)
     rel_path = os.path.relpath(journal_file, vault_path)
-    return {'status': 'saved', 'file_path': rel_path, 'date': today}
+    return {'status': 'saved', 'file_path': rel_path, 'date': today,
+            'project': project or None}
 
 
 def list_recent_journal(vault_path, days=7):
-    """List recent journal entries. Returns list of { date, count, previews }."""
+    """List recent journal entries across all projects.
+
+    Returns list of { date, count, previews, project } sorted newest-first.
+    Top-level entries (wiki/journal/Journal-*.md) carry ``project`` = None;
+    per-project entries (wiki/journal/<project>/Journal-*.md) carry the
+    project subdir name.
+    """
     journal_dir = os.path.join(vault_path, 'wiki', 'journal')
-    files = sorted(glob.glob(os.path.join(journal_dir, '*.md')), reverse=True)
+
+    # (filepath, project-subdir-name-or-None)
+    candidates = []
+    for f in glob.glob(os.path.join(journal_dir, '*.md')):
+        candidates.append((f, None))
+    for f in glob.glob(os.path.join(journal_dir, '*', '*.md')):
+        project = os.path.basename(os.path.dirname(f))
+        candidates.append((f, project))
+
+    # Sort newest-first by the date embedded in the filename (falls back to
+    # the basename so undated files still sort deterministically).
+    def _sort_key(item):
+        base = os.path.splitext(os.path.basename(item[0]))[0]
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', base)
+        return (m.group(1) if m else base, base)
+
+    candidates.sort(key=_sort_key, reverse=True)
+
     result = []
-    for f in files[:days]:
+    for f, project in candidates[:days]:
         date = os.path.splitext(os.path.basename(f))[0]
         with open(f, 'r', encoding='utf-8') as fh:
             content = fh.read()
         entries = re.findall(r'### \d{2}:\d{2}\n\n(.+?)(?=\n### |\n---|\Z)', content, re.DOTALL)
         previews = [e.strip().split('\n')[0][:80] for e in entries[-3:]]
-        result.append({'date': date, 'count': len(entries), 'previews': previews})
+        result.append({'date': date, 'count': len(entries),
+                       'previews': previews, 'project': project})
     return result
 
 

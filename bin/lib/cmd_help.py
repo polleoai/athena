@@ -26,6 +26,8 @@ Commands:
   kb batch                  Process all URLs in inbox/url-new.txt
   kb rename <page> --to      Rename a page and update all references
   kb refresh-wiki <page>     Re-process raw → rewrite wiki body (snapshot to trash)
+  kb bases                   Generate Obsidian Bases over typed collections (wiki/bases/)
+  kb canvas <topic>          Render a topic's related: graph as a 1-hop Obsidian Canvas
   kb delete <page>           Trash a page AND its raw source (recoverable via kb undo)
   kb create <name> [--topic]  Create an empty hub/group page
   kb attach <p1> --to        Add page to hub WITHOUT removing other memberships (multi-hub)

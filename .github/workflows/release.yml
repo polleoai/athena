@@ -78,6 +78,27 @@ jobs:
           fi
           echo "TAG_NAME validated: $TAG_NAME"
 
+      - name: Guard — Gryphon submodule pin must be released (on polleoai/gryphon)
+        # The dev auto-fix loop (gryphon-autofix-loop) can pin vendor/gryphon to
+        # a jivebug/gryphon-dev commit that was never released to polleoai. A
+        # public release's submodule (.gitmodules -> polleoai/gryphon) cannot
+        # resolve such a pin, so the checkout-with-submodules step below would
+        # fail cryptically. Fail fast and clearly BEFORE that. Release is
+        # deliberately OUT of the auto-fix loop; this is the CI safety net
+        # (mirror of scripts/assert-gryphon-released.sh for the local path).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PIN=$(gh api "repos/${GITHUB_REPOSITORY}/contents/vendor/gryphon?ref=${TAG_NAME}" --jq '.sha')
+          echo "Pinned vendor/gryphon = $PIN"
+          if gh api "repos/polleoai/gryphon/commits/${PIN}" >/dev/null 2>&1; then
+            echo "✓ released — pinned commit is present on polleoai/gryphon"
+          else
+            echo "✗ pinned Gryphon commit ${PIN} is NOT on polleoai/gryphon (dev-only)."
+            echo "  Re-pin vendor/gryphon to a released Gryphon tag before releasing Athena."
+            exit 1
+          fi
+
       - name: Checkout the tagged commit (with submodules)
         uses: actions/checkout@v4
         with:

@@ -2,6 +2,28 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.5.0] — 2026-06-21
+
+Headline: **see your knowledge, not just store it — Bases, Canvas, and per-project journals.** Athena already captures and synthesizes everything you read into a typed, cross-linked vault. This release adds three ways to *view* it in Obsidian's own surfaces — and fixes provider setup so you can configure any AI provider directly from Athena. Bundles **Gryphon 2.5.0**.
+
+### Added
+
+- **`kb bases` — your knowledge as live, filterable tables.** Generates Obsidian Bases (`.base`) over each typed collection (papers, repos, videos, webpages, entities) plus an "All Knowledge" dashboard, into `wiki/bases/`. Each is a sortable table built from that type's own fields (title, tags, date, link). Re-run any time; it only rewrites what changed.
+- **`kb canvas <topic>` — a visual map of how a topic connects.** Renders a topic's cross-references as an Obsidian Canvas (`.canvas`): the topic in the center, ringed by the pages it links to, colored by type. Turns the connections Athena builds as you read into something you can actually see, into `wiki/canvas/`.
+- **`kb journal --project "X"` — journals that know which project they belong to.** Scopes a journal entry to a project (`wiki/journal/X/`) and seeds a retrospective template (done / data / problems / learnings / tomorrow / what's worth keeping). `kb reflect --project "X"` reflects on just that project. Plain `kb journal` is unchanged.
+
+### Fixed
+
+- **You can now set any AI provider's API key from Athena's own settings.** Athena's settings tab previously left out the API-key fields, so anyone using a key-based provider — Gemini, OpenAI, or the Anthropic API — had no way to configure it and the assistant simply wouldn't run. Athena now renders the full provider, model, and key configuration directly, so every provider is set up in one place.
+
+### Changed
+
+- **Bundles Gryphon 2.5.0.** Brings a configurable fallback provider (Gryphon retries on a backup when your main provider is rate-limited or briefly unavailable, and tells you which one answered) and a readiness check that flags a missing key or uninstalled CLI *before* you send — both now surfaced inside Athena's settings.
+
+### Notes
+
+- Bases and Canvas write native Obsidian files into your vault; regenerating snapshots the prior version to `.kb-trash/` first, so nothing is lost. Empty collections are skipped.
+
 ## [1.4.3] — 2026-06-21
 
 Headline: **capture and ingest keep working even when your system Python is broken.** If your computer's Python was missing a piece (a mismatched install — common after an OS or Homebrew update), clipping a page would silently do nothing: the clip landed but never became a note. Athena already builds its own clean, isolated Python when you run `kb doctor --fix` — but until now nothing actually used it for the command-line ingest. Now Athena detects a broken interpreter and automatically switches to its own healthy one, so capture and ingest just work. Bundles **Gryphon 2.4.5** (unchanged).
