@@ -151,8 +151,11 @@ One word: **`kb`** followed by what the user wants.
 | `kb list --recent` | Last 20 additions (any type) |
 | `kb list --journal` | List journal entries |
 | `kb journal "text"` | Write a quick learning journal entry |
+| `kb journal --project "X" "text"` | Write a journal entry scoped to a project (`wiki/journal/<X>/`, retrospective template) |
 | `kb insight "Title"` | Save a polished finding as a permanent wiki page |
-| `kb reflect` | AI reads recent journal, proposes insights from patterns |
+| `kb reflect` | AI reads recent journal, proposes insights from patterns (`--project "X"` to scope) |
+| `kb bases` | Generate Obsidian Bases (`.base`) over the typed collections into `wiki/bases/` |
+| `kb canvas <topic>` | Render a topic's `related:` graph as an Obsidian Canvas (`.canvas`) in `wiki/canvas/` |
 | `kb rename <page> --to "New"` | Rename a page and update all wikilinks across the KB |
 | `kb refresh-wiki <page>` | Re-process the raw source and rewrite the wiki body (snapshot prior page to `.kb-trash/`). Use after a process_clip / wiki_writer fix to replay against existing pages. |
 | `kb remove <page>` | Soft-delete a wiki page and its backing raw source to trash. The pair is always moved together (an orphan raw without its wiki companion would auto-recreate the wiki on the next lint pass). |
