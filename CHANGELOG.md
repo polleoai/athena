@@ -2,6 +2,15 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.5.1] — 2026-06-22
+
+Headline: **bundled-assistant maintenance — Obsidian plugin-guideline compliance.** A housekeeping release. The bundled assistant (Gryphon) had an Obsidian community-review pass: shorter command names, and its timer, configuration-folder, and command-registration code brought in line with the plugin guidelines. No behaviour change — every command, provider failover, the readiness check, and the security guardrails all work exactly as in 1.5.0. Bundles **Gryphon 2.5.1**.
+
+### Changed
+
+- **Vendored Gryphon 2.5.0 → 2.5.1.** Obsidian plugin-guideline compliance pass (timer usage, config-folder handling, command registration) plus shorter command names in the palette. No behaviour change.
+- **Athena resolves its plugin folder via the vault's configured config directory** instead of a hardcoded `.obsidian` fallback, so a renamed Obsidian config folder is handled correctly. No behaviour change for default setups.
+
 ## [1.5.0] — 2026-06-21
 
 Headline: **see your knowledge, not just store it — Bases, Canvas, and per-project journals.** Athena already captures and synthesizes everything you read into a typed, cross-linked vault. This release adds three ways to *view* it in Obsidian's own surfaces — and fixes provider setup so you can configure any AI provider directly from Athena. Bundles **Gryphon 2.5.0**.

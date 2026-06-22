@@ -659,8 +659,11 @@ function resolvePythonScript(plugin, relPath) {
   const vaultPath = plugin.app.vault.adapter.basePath;
   // Plugin's install dir. manifest.dir is documented to be a vault-relative
   // path on most Obsidian versions; treat it as such with a defensive fallback.
+  // Use the vault's actual config dir (users can rename it from ".obsidian");
+  // only fall back to the literal if the API somehow returns nothing.
+  const configDir = (plugin.app.vault.configDir) || ".obsidian";
   const pluginRel = (plugin.manifest && plugin.manifest.dir)
-    || `.obsidian/plugins/${(plugin.manifest && plugin.manifest.id) || "athena"}`;
+    || `${configDir}/plugins/${(plugin.manifest && plugin.manifest.id) || "athena"}`;
   const pluginAbs = path.isAbsolute(pluginRel)
     ? pluginRel
     : path.join(vaultPath, pluginRel);
