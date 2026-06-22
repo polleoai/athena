@@ -49,12 +49,24 @@ def _parse_journal_entries(filepath):
     return entries
 
 
-def gather_journal_entries(kb_root, days=7):
+def gather_journal_entries(kb_root, days=7, project=None):
     """Read journal entries from the last N days.
+
+    When ``project`` is set, only the per-project subdir
+    ``wiki/journal/<safe(project)>/`` is scanned; otherwise the top-level
+    ``wiki/journal/`` is scanned (unchanged behavior).
 
     Returns list of entry dicts sorted newest-first.
     """
-    journal_dir = os.path.join(kb_root, 'wiki', 'journal')
+    if project:
+        import sys as _sys
+        _lib = os.path.dirname(os.path.abspath(__file__))
+        if _lib not in _sys.path:
+            _sys.path.insert(0, _lib)
+        from wiki_writer import _safe_filename
+        journal_dir = os.path.join(kb_root, 'wiki', 'journal', _safe_filename(project))
+    else:
+        journal_dir = os.path.join(kb_root, 'wiki', 'journal')
     if not os.path.isdir(journal_dir):
         return []
 
@@ -634,7 +646,7 @@ def _filter_entries_by_focus(entries, focus):
     return entries
 
 
-def build_reflect_report(kb_root, days=7, deep=False, focus=None):
+def build_reflect_report(kb_root, days=7, deep=False, focus=None, project=None):
     """Build the complete reflect report for LLM analysis.
 
     Args:
@@ -654,7 +666,7 @@ def build_reflect_report(kb_root, days=7, deep=False, focus=None):
         - focus: the user's focus string (or None)
         - stats: summary counts
     """
-    journal_entries = gather_journal_entries(kb_root, days=days)
+    journal_entries = gather_journal_entries(kb_root, days=days, project=project)
     session_logs = gather_session_logs(kb_root, days=days)
     existing_insights = gather_existing_insights(kb_root)
 

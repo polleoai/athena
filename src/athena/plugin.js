@@ -33,7 +33,7 @@ const os = require("os");
 // See src/athena/athena-chat-view.js for the architectural rationale.
 const { AthenaChatView } = require("./athena-chat-view");
 const {
-  DEFAULT_SETTINGS, MODELS, EFFORTS, PERMS, PROVIDER_PREFS,
+  DEFAULT_SETTINGS,
   resolveConnectionTimeoutMs,
 } = require("../../vendor/gryphon/src/constants");
 const { findClaudeBinary, buildEnhancedPath } = require("../../vendor/gryphon/src/utils");
@@ -3660,252 +3660,21 @@ class AthenaSettingTab extends PluginSettingTab {
         });
       });
 
-    new Setting(el)
-      .setName("Claude Code CLI path")
-      .setDesc("Leave empty to auto-detect.")
-      .addText((text) => {
-        text.setPlaceholder("Auto-detect")
-          .setValue(this.plugin.settings.claudePath)
-          .onChange(async (v) => { this.plugin.settings.claudePath = v; await this.plugin.saveSettings(); });
-      });
-
-    // Helper for #122: as of Gryphon 2.4.4, GryphonChatView retires its live
-    // session whenever a spawn-time setting (provider/model/effort/permission)
-    // changes — driven by the gryphon:settings-changed event our saveSettings()
-    // fires (polleoai/gryphon#40). So the change now takes effect on the next
-    // message automatically; this Notice just confirms that to the user.
-    const showRefreshNotice = (settingName) => {
-      new Notice(
-        `${settingName} updated — takes effect on your next message.`,
-        5000
-      );
-    };
-
-    new Setting(el)
-      .setName("LLM provider")
-      .setDesc("Which backend Gryphon uses to reach the model. \"Auto\" prefers Claude Code if installed, else the first available API key (Anthropic \u2192 OpenAI \u2192 Google).")
-      .addDropdown((d) => {
-        for (const p of PROVIDER_PREFS) d.addOption(p.value, p.label + " \u2014 " + p.desc);
-        d.setValue(this.plugin.settings.providerPreference || "auto")
-          .onChange(async (v) => {
-            this.plugin.settings.providerPreference = v;
-            await this.plugin.saveSettings();
-            showRefreshNotice("LLM provider");
-            // Re-render the settings tab so downstream provider-dependent
-            // sections (model dropdown labels, API-key fields, CLI-path
-            // fields, health-check button) reflect the new provider.
-            // Without this, the user sees the provider value change but
-            // nothing else updates until they reopen the settings tab.
-            this.display();
-          });
-      });
-
-    // Provider-specific Default model dropdown. Mirrors Gryphon's
-    // three-branch pattern in vendor/gryphon/src/plugin.js \u2014 without it,
-    // OpenAI / Gemini users only see the Anthropic abstract tiers
-    // (Haiku / Sonnet / Opus) and the dropdown looks broken because none
-    // of those are real OpenAI or Gemini model ids. Auto resolves to the
-    // currently-active provider so users with only one key see that
-    // provider's native list.
-    const { getActiveProviderKind } = require("../../vendor/gryphon/src/providers/factory");
-    const _activeKind = getActiveProviderKind(this.plugin) ||
-                        this.plugin.settings.providerPreference || "auto";
-
-    if (_activeKind === "google-api" || _activeKind === "gemini-cli") {
-      const {
-        getModelDropdownOptions: getGeminiOptions,
-        resolveModel: resolveGeminiModel,
-        DEFAULT_MODEL: GEMINI_DEFAULT_MODEL,
-      } = require("../../vendor/gryphon/src/providers/google-api/pricing");
-      const geminiModels = getGeminiOptions();
-      // Auto-correct stale cross-vendor ids (e.g. "sonnet" carried over
-      // from prior Anthropic use) so the displayed dropdown value, the
-      // chat toolbar, and runtime model resolution all agree.
-      const isKnown = geminiModels.some((o) => o.id === this.plugin.settings.model);
-      if (!isKnown) {
-        const resolved = resolveGeminiModel(this.plugin.settings.model);
-        const fitsDropdown = geminiModels.some((o) => o.id === resolved);
-        const persistTarget = fitsDropdown ? resolved : GEMINI_DEFAULT_MODEL;
-        if (this.plugin.settings.model !== persistTarget) {
-          this.plugin.settings.model = persistTarget;
-          this.plugin.saveSettings();
-        }
-      }
-      new Setting(el)
-        .setName("Default model")
-        .setDesc("Also changeable from the chat toolbar.")
-        .addDropdown((d) => {
-          for (const m of geminiModels) d.addOption(m.id, m.label);
-          d.setValue(this.plugin.settings.model)
-            .onChange(async (v) => {
-              this.plugin.settings.model = v;
-              await this.plugin.saveSettings();
-              showRefreshNotice("Default model");
-            });
-        });
-    } else if (_activeKind === "openai-api" || _activeKind === "codex-cli") {
-      const {
-        getModelDropdownOptions: getOpenAIOptions,
-        resolveModel: resolveOpenAIModel,
-        DEFAULT_MODEL: OPENAI_DEFAULT_MODEL,
-      } = require("../../vendor/gryphon/src/providers/openai-api/pricing");
-      const openaiModels = getOpenAIOptions();
-      const isKnown = openaiModels.some((o) => o.id === this.plugin.settings.model);
-      if (!isKnown) {
-        const resolved = resolveOpenAIModel(this.plugin.settings.model);
-        const fitsDropdown = openaiModels.some((o) => o.id === resolved);
-        const persistTarget = fitsDropdown ? resolved : OPENAI_DEFAULT_MODEL;
-        if (this.plugin.settings.model !== persistTarget) {
-          this.plugin.settings.model = persistTarget;
-          this.plugin.saveSettings();
-        }
-      }
-      new Setting(el)
-        .setName("Default model")
-        .setDesc("Also changeable from the chat toolbar.")
-        .addDropdown((d) => {
-          for (const m of openaiModels) d.addOption(m.id, m.label);
-          d.setValue(this.plugin.settings.model)
-            .onChange(async (v) => {
-              this.plugin.settings.model = v;
-              await this.plugin.saveSettings();
-              showRefreshNotice("Default model");
-            });
-        });
-    } else {
-      // Anthropic family (claude-code / anthropic-api / auto-resolves-to-Anthropic)
-      // uses the abstract MODELS list \u2014 Gryphon maps these to concrete
-      // versions at chat time, so haiku/sonnet/opus/opus[1m] are the
-      // right surface here.
-      new Setting(el)
-        .setName("Default model")
-        .setDesc("Also changeable from the chat toolbar. Gryphon resolves these tiers to the latest concrete versions at chat time.")
-        .addDropdown((d) => {
-          for (const m of MODELS) d.addOption(m.value, m.label + " \u2014 " + m.desc);
-          // If the current model is a non-Anthropic id (e.g. user just
-          // switched from OpenAI to Anthropic), fall back to "sonnet".
-          const _currentValid = MODELS.some((m) => m.value === this.plugin.settings.model);
-          d.setValue(_currentValid ? this.plugin.settings.model : "sonnet")
-            .onChange(async (v) => {
-              this.plugin.settings.model = v;
-              await this.plugin.saveSettings();
-              showRefreshNotice("Default model");
-            });
-        });
-    }
-
-    new Setting(el)
-      .setName("Default effort")
-      .addDropdown((d) => {
-        for (const e of EFFORTS) d.addOption(e.value, e.label + " \u2014 " + e.desc);
-        d.setValue(this.plugin.settings.effort)
-          .onChange(async (v) => {
-            this.plugin.settings.effort = v;
-            await this.plugin.saveSettings();
-            showRefreshNotice("Default effort");
-          });
-      });
-
-    new Setting(el)
-      .setName("Default permission mode")
-      .setDesc("Safe = auto-accept edits. YOLO = skip all checks. Plan = propose only.")
-      .addDropdown((d) => {
-        for (const p of PERMS) d.addOption(p.value, p.label + " \u2014 " + p.desc);
-        d.setValue(this.plugin.settings.permissionMode)
-          .onChange(async (v) => {
-            this.plugin.settings.permissionMode = v;
-            await this.plugin.saveSettings();
-            showRefreshNotice("Default permission mode");
-          });
-      });
-
-    // Issue #133: connection-timeout override, mirroring Gryphon's tab
-    // (Gryphon #38 in v1.4.0). Empty input = use the model-adaptive
-    // default \u2014 Haiku 30s, Sonnet 60s, Opus 120s, Opus 1M 180s; non-
-    // Anthropic providers 60s. 5\u2013600 second range; out-of-range silently
-    // ignored to avoid noisy mid-typing errors. Status line below shows
-    // the effective timeout so users see what was accepted.
-    let timeoutStatusEl = null;
-    const updateTimeoutStatus = (rawInput) => {
-      if (!timeoutStatusEl) return;
-      const trimmed = (rawInput || "").trim();
-      const effectiveMs = resolveConnectionTimeoutMs({
-        override: this.plugin.settings.connectionTimeoutMs,
-        model: this.plugin.settings.model,
-      });
-      const effectiveSec = Math.round(effectiveMs / 1000);
-      let prefix;
-      let color = "";
-      if (!trimmed) {
-        prefix = `Using model-adaptive default: ${effectiveSec}s`;
-      } else {
-        const sec = Number(trimmed);
-        if (Number.isFinite(sec) && sec >= 5 && sec <= 600) {
-          prefix = `\u2713 Override active: ${effectiveSec}s`;
-          color = "var(--color-green)";
-        } else {
-          prefix = `\u2717 Invalid: must be 5\u2013600 seconds. Currently using: ${effectiveSec}s`;
-          color = "var(--color-red)";
-        }
-      }
-      timeoutStatusEl.setText(prefix);
-      timeoutStatusEl.style.color = color;
-    };
-
-    new Setting(el)
-      .setName("Connection timeout (seconds)")
-      .setDesc(
-        "How long to wait for the model's first token before treating " +
-        "the request as stuck. Leave empty for the model-adaptive " +
-        "default (Haiku 30s, Sonnet 60s, Opus 120s, Opus 1M 180s; " +
-        "non-Anthropic providers 60s). Set 5\u2013600 to override for " +
-        "slow networks or unusually large prompts."
-      )
-      .addText((text) => {
-        const stored = this.plugin.settings.connectionTimeoutMs;
-        const display = (typeof stored === "number" && Number.isFinite(stored) && stored > 0)
-          ? String(Math.round(stored / 1000))
-          : "";
-        text
-          .setPlaceholder("default")
-          .setValue(display)
-          .onChange(async (value) => {
-            const trimmed = (value || "").trim();
-            if (!trimmed) {
-              this.plugin.settings.connectionTimeoutMs = null;
-              await this.plugin.saveSettings();
-              updateTimeoutStatus(value);
-              return;
-            }
-            const sec = Number(trimmed);
-            if (Number.isFinite(sec) && sec >= 5 && sec <= 600) {
-              this.plugin.settings.connectionTimeoutMs = Math.round(sec) * 1000;
-              await this.plugin.saveSettings();
-            }
-            // Out-of-range or non-numeric: don't persist. Status line
-            // below shows the validation error AND the effective fallback
-            // so the user sees their input was rejected.
-            updateTimeoutStatus(value);
-          });
-      })
-      .then((setting) => {
-        timeoutStatusEl = setting.descEl.createDiv({ cls: "setting-item-description" });
-        timeoutStatusEl.style.marginTop = "4px";
-        timeoutStatusEl.style.fontStyle = "italic";
-        const stored = this.plugin.settings.connectionTimeoutMs;
-        const initialDisplay = (typeof stored === "number" && Number.isFinite(stored) && stored > 0)
-          ? String(Math.round(stored / 1000))
-          : "";
-        updateTimeoutStatus(initialDisplay);
-      });
-
-    new Setting(el)
-      .setName("Open in main tab")
-      .setDesc("Open chat in a main tab instead of the right sidebar.")
-      .addToggle((t) => {
-        t.setValue(this.plugin.settings.openInMainTab)
-          .onChange(async (v) => { this.plugin.settings.openInMainTab = v; await this.plugin.saveSettings(); });
-      });
+    // AI provider, model, and API keys are rendered by Gryphon's own settings
+    // UI (renderGryphonSettings, landed via gryphon#14) so Athena can never
+    // drift from the fields the provider runtime actually reads. This replaced
+    // ~280 lines of hand-mirrored Setting rows that had dropped the API-key
+    // inputs entirely — Gemini / OpenAI / Anthropic-API users could not
+    // configure a key from Athena. chrome:false suppresses Gryphon's
+    // quick-start callout + manual link (Athena supplies its own surrounding
+    // UI); onRerender re-renders this whole tab when a provider switch needs
+    // provider-dependent fields to refresh.
+    const { renderGryphonSettings } = require("../../vendor/gryphon/src/settings-view");
+    el.createEl("h3", { text: "AI provider & model" });
+    renderGryphonSettings(this.plugin, el, {
+      chrome: false,
+      onRerender: () => this.display(),
+    });
 
     new Setting(el)
       .setName("Web Clipper folders")

@@ -7,9 +7,13 @@ args = sys.argv[2:]
 days = 7
 deep = False
 focus = None
+project = None
 i = 0
 while i < len(args):
     if args[i] in ('--help', '-h'):
+        # NOTE: kept byte-identical to bin/kb-legacy's reflect help so
+        # test_reflect_help parity holds. --project is intentionally NOT
+        # documented here (the frozen oracle has no such flag).
         print("""Usage: kb reflect [--focus "topic"] [--days N] [--deep]
 
 Gather journal entries, session logs, and related pages for pattern analysis.
@@ -39,6 +43,8 @@ Examples:
         focus = args[i + 1]; i += 2
     elif args[i] == '--deep':
         deep = True; i += 1
+    elif args[i] in ('--project', '-p') and i + 1 < len(args):
+        project = args[i + 1]; i += 2
     elif not args[i].startswith('--') and focus is None:
         # Bare argument treated as focus
         focus = args[i]; i += 1
@@ -54,5 +60,5 @@ if lib_dir not in sys.path:
 
 from reflect import build_reflect_report, format_report_text
 
-report = build_reflect_report(KB, days=days, deep=deep, focus=focus)
+report = build_reflect_report(KB, days=days, deep=deep, focus=focus, project=project)
 print(format_report_text(report))

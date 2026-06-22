@@ -25,7 +25,9 @@ import cmd_add_content
 import cmd_analyze
 import cmd_attach
 import cmd_backfill_assets
+import cmd_bases
 import cmd_batch
+import cmd_canvas
 import cmd_capture_deep
 import cmd_config
 import cmd_create
@@ -183,6 +185,8 @@ PORTED: Dict[str, Handler] = {
     "merge": cmd_merge.handle,
     "rename": cmd_rename.handle,
     "refresh-wiki": cmd_refresh_wiki.handle,
+    "bases": cmd_bases.handle,
+    "canvas": cmd_canvas.handle,
     "attach": cmd_attach.handle,
     "detach": cmd_detach.handle,
     "purge": cmd_purge.handle,

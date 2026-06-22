@@ -24,18 +24,30 @@ def handle(argv: List[str], root: str) -> int:
     # ── Shell-level arg parse (mirrors the for/case loop) ──
     journal_text_parts: List[str] = []
     journal_recent = False
-    for arg in argv:
+    project = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg in ("--help", "-h"):
             print('Usage: kb journal "your insight or note"')
+            print('       kb journal --project "Project Name" "your note"')
             print("       kb journal --recent")
             print("")
             print("Write a learning journal entry. One file per day in wiki/journal/.")
+            print("With --project (or -p), the entry is written under")
+            print("wiki/journal/<Project>/ and a new day file is seeded with a")
+            print("retrospective template (Done/Data/Problems/Learnings/Tomorrow/KB-worthy).")
             print("In an AI session, the AI will auto-link your entry to related wiki pages.")
             return 0
         elif arg in ("--recent", "-r"):
             journal_recent = True
+            i += 1
+        elif arg in ("--project", "-p") and i + 1 < len(argv):
+            project = argv[i + 1]
+            i += 2
         else:
             journal_text_parts.append(arg)
+            i += 1
 
     # JOURNAL_TEXT="$JOURNAL_TEXT $arg" then `sed 's/^ //'` -- leading space stripped.
     journal_text = " ".join(journal_text_parts)
@@ -46,7 +58,13 @@ def handle(argv: List[str], root: str) -> int:
             print("No journal entries yet.")
         else:
             for e in entries:
-                print(f"  {e['date']} ({e['count']} entries)")
+                # Top-level entries keep the legacy byte-identical line; only
+                # project entries get the "[project]" annotation appended.
+                proj = e.get("project")
+                if proj:
+                    print(f"  {e['date']} ({e['count']} entries) [{proj}]")
+                else:
+                    print(f"  {e['date']} ({e['count']} entries)")
                 for p in e["previews"]:
                     print(f"    - {p}")
         return 0
@@ -65,9 +83,14 @@ def handle(argv: List[str], root: str) -> int:
         print("Empty entry. Nothing saved.")
         return 0
 
-    result = create_journal_entry(root, journal_text)
+    result = create_journal_entry(root, journal_text, project=project)
     date = result.get("date", "") or ""
-    print(f"Saved to: wiki/journal/{date}.md")
+    if project:
+        # Project entries report the real project-relative path.
+        print(f"Saved to: {result.get('file_path', '')}")
+    else:
+        # Legacy byte-identical wording for the no-project path.
+        print(f"Saved to: wiki/journal/{date}.md")
     print("")
     print("In an AI session, say 'kb link-journal' to auto-link this entry to related pages.")
     return 0
