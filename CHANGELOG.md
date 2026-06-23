@@ -2,6 +2,16 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.6.0] — 2026-06-23
+
+Headline: **a clearer way to set up your AI provider — redesigned settings.** The provider, model, and API-key controls Athena embeds from the bundled assistant (Gryphon) are now organized into a **Models / Advanced** tab strip: your provider choice, its credentials, and the per-session defaults sit together under **Models**, with niche tuning knobs tucked into **Advanced**. Same fields, grouped so the primary setup path is obvious and the rarely-touched options stay out of the way. Bundles **Gryphon 2.6.0**.
+
+### Changed
+
+- **Redesigned provider & model settings (tabbed).** The embedded provider surface now renders as **Models / Advanced** tabs instead of one long list. The Models tab groups provider selection, scoped credentials, per-session defaults, and the fallback provider; Advanced holds the Brave key, auto-compact, auto-retry, connection timeout, and max file size. No setting was removed — every control from 1.5.1 is still here.
+- **Vendored Gryphon 2.5.1 → 2.6.0.** Brings the redesigned settings interface plus shorter command names in the palette and an internal code-quality pass. No behaviour change to provider failover, the readiness check, or the security guardrails.
+- **Athena's provider settings refresh themselves on a provider switch.** Switching provider inside the embedded surface now updates the provider-dependent credential fields on its own; Athena no longer drives that refresh from the host side.
+
 ## [1.5.1] — 2026-06-22
 
 Headline: **bundled-assistant maintenance — Obsidian plugin-guideline compliance.** A housekeeping release. The bundled assistant (Gryphon) had an Obsidian community-review pass: shorter command names, and its timer, configuration-folder, and command-registration code brought in line with the plugin guidelines. No behaviour change — every command, provider failover, the readiness check, and the security guardrails all work exactly as in 1.5.0. Bundles **Gryphon 2.5.1**.

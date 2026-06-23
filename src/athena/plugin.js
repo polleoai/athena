@@ -3668,15 +3668,16 @@ class AthenaSettingTab extends PluginSettingTab {
     // drift from the fields the provider runtime actually reads. This replaced
     // ~280 lines of hand-mirrored Setting rows that had dropped the API-key
     // inputs entirely — Gemini / OpenAI / Anthropic-API users could not
-    // configure a key from Athena. chrome:false suppresses Gryphon's
-    // quick-start callout + manual link (Athena supplies its own surrounding
-    // UI); onRerender re-renders this whole tab when a provider switch needs
-    // provider-dependent fields to refresh.
+    // configure a key from Athena. As of Gryphon 2.6.0 this surface renders as
+    // a Models/Advanced tab strip and refreshes provider-dependent fields on
+    // its own (the tab harness re-renders internally on a provider switch), so
+    // the host no longer supplies an onRerender callback. chrome:false marks
+    // the embedded case; initialTabId opens on the Models tab.
     const { renderGryphonSettings } = require("../../vendor/gryphon/src/settings-view");
     el.createEl("h3", { text: "AI provider & model" });
     renderGryphonSettings(this.plugin, el, {
       chrome: false,
-      onRerender: () => this.display(),
+      initialTabId: "models",
     });
 
     new Setting(el)
