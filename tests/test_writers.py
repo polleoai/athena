@@ -644,18 +644,36 @@ class TestProcessClip(_VaultCase):
             process_clip(clip, self.vault)
         self.assertIn("source URL", str(ctx.exception))
 
-    def test_empty_body_rejected(self):
-        from process_clip import process_clip, ProcessClipError
+    def test_empty_body_falls_back_to_network_capture(self):
+        # An empty-body clip (iframe-heavy / JS-rendered page) is RECOVERABLE,
+        # not fatal: process_clip falls back to a network fetch of the URL
+        # instead of hard-failing (which used to leave the clip stuck in the
+        # watched inbox, spamming "clip body is empty"). See
+        # test_process_clip_empty_body.py for the full contract. Here we just
+        # confirm an empty body no longer raises outright. ingest is stubbed
+        # so the test stays offline.
+        import process_clip as pc
+        import unified_ingest as ui
         clip_dir = Path(self.vault) / "clippings"
         clip_dir.mkdir(exist_ok=True)
         clip = clip_dir / "empty.md"
-        # Truly empty body — no H1, no content after FM closing `---`
         clip.write_text(
             '---\ntitle: "x"\nsource: "https://example.com"\n---\n',
             encoding="utf-8",
         )
-        with self.assertRaises(ProcessClipError):
-            process_clip(clip, self.vault)
+        fake_raw = Path(self.vault) / "raw/webpages/artifacts/example.md"
+        fake_raw.parent.mkdir(parents=True, exist_ok=True)
+        fake_raw.write_text("ok", encoding="utf-8")
+        orig_ingest, orig_touch = ui.ingest, pc._touch_wiki_last_updated_for_url
+        pc._touch_wiki_last_updated_for_url = lambda *a, **k: None
+        ui.ingest = lambda inp: ui.IngestResult(
+            raw_path=fake_raw, source_type="webpage", canonical_url=inp.url,
+            title="x", extracted_via="arcus", was_re_routed=False,
+        )
+        try:
+            self.assertEqual(pc.process_clip(clip, self.vault), fake_raw)
+        finally:
+            ui.ingest, pc._touch_wiki_last_updated_for_url = orig_ingest, orig_touch
 
 
 # ─── migrate_raws round-trip ─────────────────────────────────────────

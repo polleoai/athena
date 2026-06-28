@@ -208,6 +208,26 @@ def ingest(input: IngestInput) -> IngestResult:
         )
 
     result = handler(input, routing, canonical_url)
+
+    # 4. Embed discovery — a webpage may embed its real content from another
+    #    URL via an <iframe> (slide decks, embedded docs). The browser clipper
+    #    can't read cross-origin iframes and arcus strips the shells, so those
+    #    sources are invisible. Surface them as their own capturable URLs.
+    #    Best-effort: never let discovery break an ingest.
+    if result.source_type == "webpage":
+        try:
+            import embed_discovery  # type: ignore
+
+            queued = embed_discovery.discover_and_queue(
+                input.vault_root,
+                canonical_url,
+                html=input.html or None,  # reuse pre-fetched HTML if present
+            )
+            if queued:
+                result.related_urls_queued.extend(queued)
+        except Exception:
+            pass
+
     return result
 
 
