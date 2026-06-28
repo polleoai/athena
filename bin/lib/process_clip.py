@@ -143,7 +143,89 @@ def _is_x_status_url(url: str) -> bool:
     return fetch_tweet.parse_status_url(url or "") is not None
 
 
-def _should_resync_tweet(canonical_url: str, fm: dict) -> bool:
+# A tweet links to one of the author's own posts: x.com/<handle>/status/<id>.
+_SELF_STATUS_LINK_RE = re.compile(
+    r'(?:x|twitter)\.com/([^/\s)"\]]+)/status/(\d+)', re.IGNORECASE)
+
+# A head tweet plus this many distinct sibling links to the SAME author's other
+# tweets marks a genuine multi-part "self-thread index" — the syndication CDN
+# returns only the head tweet, so for a thread the rich clip body must be kept.
+_SELF_THREAD_MIN_LINKS = 3
+
+
+def _self_thread_status_ids(body: str, author_handle: str) -> set[str]:
+    """Distinct tweet IDs in `body` authored by `author_handle` (case-insensitive).
+
+    Counts only the author's *own* /status/ links, so a scraped timeline
+    fragment full of other people's tweets is not mistaken for a self-thread."""
+    want = (author_handle or "").lstrip("@").lower()
+    if not want:
+        return set()
+    return {
+        tid for handle, tid in _SELF_STATUS_LINK_RE.findall(body or "")
+        if handle.lower() == want
+    }
+
+
+def _clip_is_self_thread(canonical_url: str, body: str) -> bool:
+    """True when the Web-Clipper body is an author self-thread index richer than
+    syndication's single-tweet capture.
+
+    Syndication (cdn.syndication.twimg.com) returns only the head tweet, so an
+    un-guarded resync of a thread stores a stub that drops the whole thread.
+    The clip — which rendered the full thread — references many of the author's
+    own sibling tweets; that link count is the thread signal. (Option A richness
+    guard; witnessed: gengdaj/2069425112651272493, 2026-06-26.)"""
+    import fetch_tweet
+    parsed = fetch_tweet.parse_status_url(canonical_url or "")
+    if not parsed:
+        return False
+    handle, head_id = parsed
+    ids = _self_thread_status_ids(body, handle)
+    ids.discard(head_id)  # the head tweet's own self-link doesn't count
+    return len(ids) >= _SELF_THREAD_MIN_LINKS
+
+
+def _decode_social_thread(body: str) -> str | None:
+    """Decode a web-clipper-social escaped-array thread capture to clean markdown.
+
+    The social template stores a multi-tweet thread as a pseudo-JSON array of
+    tweet texts wrapped in markdown-escaped brackets — `\\[ "tweet1","tweet2" \\]`
+    — with literal `\\n` / `\\"` escapes inside each tweet and relative
+    `("/handle/status/id")` link hrefs. Rendered verbatim this is an unreadable
+    one-line blob with broken links (the "totally broken local copy" symptom).
+
+    Returns clean markdown (tweets separated by `---`, links as bare absolute
+    URLs), or None when `body` isn't in that shape so clean captures pass
+    through untouched. Witnessed: gengdaj/2069425112651272493, 2026-06-26."""
+    s = (body or "").strip()
+    if not (s.startswith("\\[") or s.startswith("[")):
+        return None
+    if "\\n" not in s and '\\"' not in s:
+        return None  # already-clean body — nothing to decode
+    # Strip the markdown-escaped array wrapper: \[ "  ...  " \]
+    s = re.sub(r'^\\?\[\s*"?', "", s)
+    s = re.sub(r'"?\s*\\?\]$', "", s)
+    tweets = []
+    for part in re.split(r'"\s*,\s*"', s):
+        t = part.replace("\\n", "\n").replace('\\"', '"').replace("\\t", "\t")
+        t = re.sub(r'\\+(["\'])', r"\1", t)   # collapse backslashes before quotes
+        t = re.sub(r"\\+(?=\n)", "", t)       # drop dangling backslashes before newlines
+        t = re.sub(r"\\+$", "", t.rstrip())   # and at the very end
+        if t.strip():
+            tweets.append(t.strip())
+    if not tweets:
+        return None
+    text = "\n\n---\n\n".join(tweets)
+    # Repair relative tweet links -> clean absolute bare URLs.
+    text = re.sub(r'\[[^\]]*\]\(\s*"?(/[^")\s]+)"?\s*\)',
+                  lambda m: "https://x.com" + m.group(1), text)
+    text = text.replace("…", "")          # drop X UI truncation ellipses
+    text = re.sub(r"\n{3,}", "\n\n", text)      # collapse blank-line runs
+    return text.strip()
+
+
+def _should_resync_tweet(canonical_url: str, fm: dict, body: str = "") -> bool:
     """A Web-Clipper clip whose source is an x.com/twitter /status/ URL.
 
     The Web Clipper's DOM scrape of tweets is unreliable — it yields an empty
@@ -151,13 +233,21 @@ def _should_resync_tweet(canonical_url: str, fm: dict) -> bool:
     long-form X Articles whose body isn't on the /status/ page at all. So we
     discard the scraped body and re-capture via the syndication CDN (and
     auto-promote article-tweets to capture-deep), exactly like `kb add <url>`.
+
+    Exception (Option A richness guard): when the clip body is an author
+    self-thread index, syndication's head-tweet-only capture is strictly thinner
+    than the clip — keep the clip body instead of clobbering it with a stub.
     Disabled via ATHENA_DISABLE_TWEET_RESYNC (tests / offline)."""
     if os.environ.get("ATHENA_DISABLE_TWEET_RESYNC"):
         return False
     via = (fm.get("clipped_via") or "").strip()
     if via not in ("web-clipper", "web-clipper-social"):
         return False
-    return _is_x_status_url(canonical_url)
+    if not _is_x_status_url(canonical_url):
+        return False
+    if _clip_is_self_thread(canonical_url, body):
+        return False  # rich thread clip — do not replace with a syndication stub
+    return True
 
 
 def _resync_tweet_clip(canonical_url: str, vault_root: Path) -> Path | None:
@@ -925,6 +1015,15 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
 
     canonical = canonicalize(url).url
 
+    # Decode web-clipper-social escaped-array captures (a thread stored as a
+    # pseudo-JSON array of tweet texts with \n/\" escapes + relative links)
+    # into clean markdown BEFORE any downstream decision — so self-thread
+    # detection sees real links and the written raw is readable, not a blob.
+    if (fm.get("clipped_via") or "").strip() == "web-clipper-social":
+        decoded = _decode_social_thread(body)
+        if decoded:
+            body = decoded
+
     # Auto-promote known-broken-via-clipper domains (LinkedIn today) to
     # capture-deep BEFORE delegating to unified_ingest. The Athena Web
     # Clipper consistently captures LinkedIn posts in URN-only URL form
@@ -973,7 +1072,7 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     # article-tweets to capture-deep — and discard the scraped body. Mirrors
     # the LinkedIn promote pattern above; independent because x.com is not in
     # _PLAYWRIGHT_DOMAINS.
-    if _should_resync_tweet(canonical, fm):
+    if _should_resync_tweet(canonical, fm, body):
         resync_clip = _resync_tweet_clip(canonical, Path(vault_root))
         if resync_clip is not None:
             try:
@@ -994,11 +1093,54 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
         # syndication failed — fall through to the clipper body (thin but real)
 
     # Body must include the actual page content. Web Clipper concatenates
-    # everything below the frontmatter into the body. unified_ingest's
-    # webpage handler also checks this, but we check here too so the
-    # error message references the clip filename (more actionable).
+    # everything below the frontmatter into the body. An EMPTY body is the
+    # signature of an iframe-heavy / JS-rendered page (e.g. a page that is
+    # mostly embedded slide decks): the browser DOM extraction yields nothing.
+    # This is RECOVERABLE, not fatal — fall back to network capture (arcus
+    # fetch), exactly as `kb add <url>` does. Hard-failing here left the clip
+    # stuck in the watched inbox so the watcher retried it every cycle and
+    # spammed "clip body is empty" indefinitely. If the network capture also
+    # fails (genuinely empty source), quarantine the clip so the retry loop
+    # stops regardless. (Anchor: provos.org two-talks, 2026-06-27.)
     if not body.strip():
-        raise ProcessClipError(f"clip body is empty: {clip.name}")
+        from unified_ingest import (  # lazy import — see module docstring
+            IngestInput,
+            UnifiedIngestError,
+            ingest,
+        )
+        # Try the canonical URL first, then the original clipped URL. They can
+        # differ — canonicalize() strips `www.` for dedup, but some hosts only
+        # serve WITH www (provos.org → arcus exit 10 without it). The clipped
+        # `source:` URL is known-good (the user's browser loaded it), so it's
+        # the right fetch fallback when the canonical form won't resolve.
+        fetch_urls = [canonical]
+        if url and url not in fetch_urls:
+            fetch_urls.append(url)
+        result = None
+        last_exc: Exception | None = None
+        for fetch_url in fetch_urls:
+            try:
+                result = ingest(IngestInput(
+                    vault_root=Path(vault_root),
+                    url=fetch_url,
+                    title=title,
+                    clipped_via=(fm.get("clipped_via") or "web-clipper").strip(),
+                    fetch_if_missing=True,  # body is empty — fetch from the URL
+                ))
+                break
+            except UnifiedIngestError as exc:
+                last_exc = exc
+        if result is None:
+            _quarantine_clip(clip, Path(vault_root), last_exc or Exception("?"))
+            raise ProcessClipError(
+                f"empty-body clip {clip.name} and network capture failed "
+                f"(quarantined): {last_exc}"
+            ) from last_exc
+        try:
+            _touch_wiki_last_updated_for_url(vault_root, canonical)
+        except Exception:
+            pass
+        return result.raw_path
 
     # Delegate routing + body processing + write to unified_ingest.
     # The legacy in-function routing (source_kind → _KIND_TO_CATEGORY)

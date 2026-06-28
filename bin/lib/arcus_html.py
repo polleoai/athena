@@ -202,6 +202,21 @@ def _humanize_url(url: str) -> str:
     return " ".join(t.capitalize() for t in tokens)[:200]
 
 
+def _www_variants(url: str) -> list[str]:
+    """Return fetch URLs to try in order: the URL as given, plus a `www.`
+    variant when the host lacks one. canonicalize() strips `www.` for dedup,
+    but some hosts only serve WITH www (provos.org), so the www variant is the
+    retry. Returns just [url] when a www variant doesn't apply.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    variants = [url]
+    parts = urlsplit(url)
+    if parts.netloc and not parts.netloc.lower().startswith("www."):
+        variants.append(urlunsplit(parts._replace(netloc="www." + parts.netloc)))
+    return variants
+
+
 def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], dict[str, Any]]:
     """Lower-level helper used by both ingest_html_url (full write) and the
     `--print-body` CLI mode (text-only). Returns (body_text, image_urls,
@@ -265,19 +280,57 @@ def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], d
             f"arcus dispatched to {provider.kind} provider, not html"
         )
 
-    with tempfile.TemporaryDirectory(prefix="athena-arcus-html-") as tmp:
-        out_dir = Path(tmp)
-        with _silence_fds():
-            exit_code = factory.run(url, out_dir=out_dir, force=False)
-        if exit_code != EXIT_CODES["SUCCESS"]:
-            raise ArcusHtmlError(
-                f"arcus extraction failed (exit {exit_code}) for {url}"
-            )
-        payload, arcus_body = _read_arcus_outputs(out_dir)
+    # Fetch with a www-variant retry. canonicalize() strips `www.` for dedup,
+    # but some hosts ONLY serve with www (provos.org → arcus exit 10 without
+    # it). When the canonical (www-less) host fails, retry once with `www.`
+    # prepended so www-only hosts still capture. (Anchor: provos.org, 2026-06-27.)
+    fetch_variants = _www_variants(url)
+
+    payload = arcus_body = None
+    last_exit = None
+    for variant in fetch_variants:
+        with tempfile.TemporaryDirectory(prefix="athena-arcus-html-") as tmp:
+            out_dir = Path(tmp)
+            with _silence_fds():
+                last_exit = factory.run(variant, out_dir=out_dir, force=False)
+            if last_exit == EXIT_CODES["SUCCESS"]:
+                payload, arcus_body = _read_arcus_outputs(out_dir)
+                break
+    if payload is None:
+        raise ArcusHtmlError(
+            f"arcus extraction failed (exit {last_exit}) for {url}"
+        )
 
     metadata = payload.get("metadata") or {}
     extractor_detail = payload.get("extractor_detail") or {}
     images = extractor_detail.get("images") or []
+
+    # reveal.js slide decks (talk pages embedded via <iframe>) aren't articles:
+    # arcus either returns empty OR extracts them messily, leaving raw HTML
+    # entities (&middot;, &amp;) and concatenated headings. The slide text lives
+    # cleanly in the static HTML <section>s. Prefer a structured slide_deck
+    # render when the page is a reveal.js deck. Gate the extra HTML fetch on a
+    # cheap signal so clean captures pay nothing: an empty body, or arcus output
+    # still carrying raw HTML entities (the exact mis-extraction fingerprint).
+    # Single-format extraction is arcus's domain long-term; this is an
+    # athena-side fallback (same precedent as the deep-mode path above).
+    _entity_smell = re.search(r"&(?:middot|amp|lt|gt|nbsp|#\d+);", arcus_body)
+    if not arcus_body.strip() or _entity_smell:
+        try:
+            import embed_discovery  # type: ignore
+            import slide_deck  # type: ignore
+
+            page_html = embed_discovery.fetch_html(url)
+            deck_md = slide_deck.extract_slide_deck(page_html or "", url=url)
+            if deck_md:
+                arcus_body = deck_md
+                if not metadata.get("title"):
+                    first = deck_md.lstrip().splitlines()[0]
+                    if first.startswith("# "):
+                        metadata = {**metadata, "title": first[2:].strip()}
+        except Exception:
+            pass
+
     return arcus_body, images, metadata
 
 

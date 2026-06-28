@@ -583,9 +583,12 @@ for f in wiki_files:
 check("Wiki pages: raw_path auto-matched", missing_raw_path_fixed, fixed=True)
 check("Wiki pages with empty raw_path", missing_raw_path)
 
-# Check duplicate raw_path references (two wiki pages → same raw file)
-from collections import Counter
-rp_counter = Counter()
+# Check duplicate raw_path references (two wiki pages → same raw file).
+# Names the offending pages so the fix is actionable: keep the richer page,
+# trash the other WIKI page only (the raw is shared — `kb remove` would trash
+# the raw too and break the survivor). (Anchor: ironcurtain.dev decks
+# double-captured — a manual create + the auto-capture pipeline, 2026-06-27.)
+rp_pages: dict[str, list[str]] = {}
 for f in wiki_files:
     fm, _ = extract_frontmatter(f)
     # Collect all raw paths from both fields
@@ -598,11 +601,16 @@ for f in wiki_files:
         paths.extend(rps)
     elif rps:
         paths.append(rps)
+    page = os.path.splitext(os.path.basename(f))[0]
     for p in paths:
         if p:
-            rp_counter[p] += 1
-dup_raw = [f"{rp} (referenced {c} times)" for rp, c in rp_counter.items() if c > 1]
-check("Duplicate raw_path (multiple wiki pages → same raw)", dup_raw)
+            rp_pages.setdefault(p, []).append(page)
+dup_raw = [
+    f"{rp}: {' / '.join(sorted(pages))}"
+    for rp, pages in rp_pages.items() if len(pages) > 1
+]
+check("Duplicate raw_path (multiple wiki pages → same raw; keep the richer "
+      "page, trash the other wiki page only — the raw is shared)", dup_raw)
 
 # ═══════════════════════════════════════════════════
 header("3. ORPHAN & CONNECTIVITY")
@@ -1260,6 +1268,68 @@ for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.m
             f"(re-capture with an X session for the full body)")
 if x_article_preview:
     check("X Articles stored preview-only (re-capture for full body)", x_article_preview)
+
+# Thread-truncated tweet raws. A Web-Clipper "self-thread index" (a tweet that
+# links to many of the author's OWN /status/ posts) re-captured via the
+# syndication CDN becomes a head-tweet stub — the whole thread is dropped.
+# process_clip now keeps the richer clip body (_clip_is_self_thread guard), but
+# surface any *existing* stub raw whose richer source clip is still waiting in
+# inbox/Clippings so it can be re-ingested. Self-author link count is the thread
+# signal (an unrelated timeline scrape links to other people, not the author).
+# NOT auto-fixed (re-ingest is a write op). Witnessed: gengdaj/2069425112651272493, 2026-06-26.
+_SELF_STATUS_RE = re.compile(r'(?:x|twitter)\.com/([^/\s)"\]]+)/status/(\d+)', re.IGNORECASE)
+
+
+def _self_thread_ids(text, handle):
+    want = (handle or '').lstrip('@').lower()
+    if not want:
+        return set()
+    return {tid for h, tid in _SELF_STATUS_RE.findall(text or '') if h.lower() == want}
+
+
+# tweet_id -> (clip_basename, self_thread_link_count) for surviving thread clips.
+# Processed clips are archived to Clippings/.processed/ (a hidden dir glob's *
+# won't match), so scan both — that's where the source clip lives post-ingest.
+thread_clips = {}
+_clip_files = (glob.glob(os.path.join(KB, 'inbox', 'Clippings', '*.md')) +
+               glob.glob(os.path.join(KB, 'inbox', 'Clippings', '.processed', '*.md')))
+for cf in _clip_files:
+    try:
+        with open(cf, 'r', encoding='utf-8') as fh:
+            ctext = fh.read()
+    except (IOError, UnicodeDecodeError):
+        continue
+    cm = re.search(r'^source:\s*"?https?://(?:www\.)?(?:x|twitter)\.com/([^/]+)/status/(\d+)',
+                   ctext, re.MULTILINE)
+    if not cm:
+        continue
+    csib = _self_thread_ids(ctext, cm.group(1))
+    csib.discard(cm.group(2))
+    if len(csib) >= 3:
+        thread_clips[cm.group(2)] = (os.path.basename(cf), len(csib))
+
+truncated_thread_raws = []
+if thread_clips:
+    for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.md'))):
+        try:
+            with open(rf, 'r', encoding='utf-8') as fh:
+                rtext = fh.read()
+        except (IOError, UnicodeDecodeError):
+            continue
+        rm = re.search(r'^source:\s*"?https?://(?:www\.)?(?:x|twitter)\.com/([^/]+)/status/(\d+)',
+                       rtext, re.MULTILINE)
+        if not rm or rm.group(2) not in thread_clips:
+            continue
+        rsib = _self_thread_ids(rtext, rm.group(1))
+        rsib.discard(rm.group(2))
+        clip_name, clip_links = thread_clips[rm.group(2)]
+        if len(rsib) < clip_links:
+            truncated_thread_raws.append(
+                f"{os.path.basename(rf)}: stored {len(rsib)} thread links, source clip "
+                f"has {clip_links} ({clip_name}) — re-ingest the clip for the full thread")
+if truncated_thread_raws:
+    check("Tweet threads truncated to head tweet (re-ingest clip for full thread)",
+          truncated_thread_raws)
 
 # ═══════════════════════════════════════════════════
 header("7. OBSIDIAN RENDER VERIFICATION")
@@ -3947,6 +4017,64 @@ if _canonical_lib_ok:
 check("Social-post canonical-source cross-links auto-added", xlink_added, fixed=True)
 if xlink_pending_capture:
     check("Canonical sources queued but not yet ingested (next sync will pull them)", xlink_pending_capture)
+
+# ─────────────────────────────────────────────────────
+pass  # 45b. Embedded-iframe sources recorded but not captured (re-queue)
+# ─────────────────────────────────────────────────────
+# embed_discovery (at ingest) records container→embed <iframe> mappings in
+# inbox/embed-sources.tsv and queues the embed URLs (slide decks, embedded
+# docs). This network-free backstop re-surfaces any embed that was recorded
+# but never captured — e.g. url-new.txt was processed-and-cleared before the
+# embed got ingested, or the embed was discovered before this feature existed
+# and only the mapping survived. Reads local state only; queue_canonical_urls
+# dedups against url-new.txt + url-resolved.tsv, so it's idempotent.
+total_checks += 1
+embed_requeued = []
+_embed_tsv = os.path.join(KB, 'inbox', 'embed-sources.tsv')
+if os.path.exists(_embed_tsv):
+    _resolved_urls = set()
+    _rtsv = os.path.join(KB, 'inbox', 'url-resolved.tsv')
+    if os.path.exists(_rtsv):
+        try:
+            for line in Path(_rtsv).read_text(encoding='utf-8').splitlines():
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    _resolved_urls.add(parts[2].strip())
+        except (IOError, UnicodeDecodeError):
+            pass
+    _queued_urls = set()
+    _untsv = os.path.join(KB, 'inbox', 'url-new.txt')
+    if os.path.exists(_untsv):
+        try:
+            _queued_urls = {ln.strip() for ln
+                            in Path(_untsv).read_text(encoding='utf-8').splitlines()
+                            if ln.strip()}
+        except (IOError, UnicodeDecodeError):
+            pass
+    try:
+        _embed_rows = [ln.split('\t') for ln
+                       in Path(_embed_tsv).read_text(encoding='utf-8').splitlines()
+                       if '\t' in ln]
+    except (IOError, UnicodeDecodeError):
+        _embed_rows = []
+    for _row in _embed_rows:
+        if len(_row) < 2:
+            continue
+        _container_url, _embed_url = _row[0].strip(), _row[1].strip()
+        if not _embed_url or _embed_url in _resolved_urls or _embed_url in _queued_urls:
+            continue
+        try:
+            from canonical_source import queue_canonical_urls  # type: ignore
+            if queue_canonical_urls(KB, _container_url, [_embed_url]):
+                _queued_urls.add(_embed_url)
+                embed_requeued.append(
+                    f"{_embed_url}  (embedded in {_container_url})"
+                )
+        except Exception:
+            pass
+if embed_requeued:
+    check("Embedded-iframe sources re-surfaced to inbox (next sync will capture them)",
+          embed_requeued)
 
 # ─────────────────────────────────────────────────────
 pass  # 46. Wiki pages with invalid YAML frontmatter (auto-fix)

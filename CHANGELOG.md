@@ -2,6 +2,25 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.6.1] — 2026-06-27
+
+Headline: **pages built from embedded slides now capture their content, clips that used to fail now recover, and a security-hardened assistant.** When you clip a page whose real content lives in an embedded slide deck or document, Athena now pulls that embedded content in as its own page instead of saving an empty shell. Clips of script-heavy pages that previously failed with an error now fall back to fetching the page directly. Bundles **Gryphon 2.6.1**, which hardens the assistant against prompt injection on the Anthropic path.
+
+### Added
+
+- **Embedded content is captured.** A page can embed its substance from another address (a slide deck, an embedded document). Athena now detects those embeds, captures each as its own page, and cross-links it to the page it came from — so the content is searchable instead of invisible. Slide decks are saved slide-by-slide as clean, readable text.
+
+### Fixed
+
+- **Clips of script-heavy pages no longer get stuck.** A clip that came through empty (common for pages that render their content dynamically) used to fail repeatedly and surface a recurring "clip processing failed" error. Athena now recovers by fetching the page directly, and only sets a clip aside if that also fails — so the error no longer repeats.
+- **Sites that only serve from their `www` address now capture.** Some sites don't respond at the bare domain; capture now retries the `www` form automatically.
+- **Clearer duplicate detection.** The health check now names the specific pages involved when two pages point at the same source, making cleanup obvious.
+- **Synthesis no longer leaves a worker behind.** After a page is synthesized, the background worker is now reaped instead of lingering, so repeated captures don't accumulate stray processes.
+
+### Changed
+
+- **Vendored Gryphon 2.6.0 → 2.6.1.** Prompt-injection hardening on the Anthropic API path. No change to provider failover, the readiness check, or the existing security guardrails.
+
 ## [1.6.0] — 2026-06-23
 
 Headline: **a clearer way to set up your AI provider — redesigned settings.** The provider, model, and API-key controls Athena embeds from the bundled assistant (Gryphon) are now organized into a **Models / Advanced** tab strip: your provider choice, its credentials, and the per-session defaults sit together under **Models**, with niche tuning knobs tucked into **Advanced**. Same fields, grouped so the primary setup path is obvious and the rarely-touched options stay out of the way. Bundles **Gryphon 2.6.0**.

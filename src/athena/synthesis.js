@@ -225,6 +225,23 @@ async function callProvider(plugin, prompt) {
       detail: (e && e.message) || String(e),
       stderr: stderrBuf.trim().slice(0, 500),
     };
+  } finally {
+    // Synthesis uses the provider for a single one-shot call. Unlike the
+    // interactive chat session (chat-view.js), we must NOT leave the CLI
+    // worker running after the call ends. ClaudeCodeProvider (and the CLI
+    // variants CodexProvider / GeminiCliProvider) spawn a persistent child
+    // process that stays alive waiting for the next turn — over a long
+    // Obsidian session dozens accumulate, dragging their MCP-server
+    // grandchildren with them (issue #196). Call abort() on every path
+    // (success AND error) so the claude process tree is torn down
+    // immediately after the result is collected.
+    //
+    // abort() on API-based providers (AnthropicAPIProvider, OpenAIProvider,
+    // GoogleProvider) cancels any active stream and is a no-op when idle —
+    // safe to call unconditionally.
+    if (typeof provider.abort === "function") {
+      try { provider.abort(); } catch (_) { /* best-effort teardown */ }
+    }
   }
 }
 
