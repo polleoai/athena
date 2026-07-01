@@ -1331,6 +1331,32 @@ if truncated_thread_raws:
     check("Tweet threads truncated to head tweet (re-ingest clip for full thread)",
           truncated_thread_raws)
 
+
+# LinkedIn posts captured before the unservable-canonical fix stored the
+# synthetic /posts/{ugcpost,activity,share}-<id> dedup key as their `source:`
+# link. LinkedIn does NOT serve that form ("Invalid post link"), and the
+# original resolvable URL was never recorded — so this is NOT auto-fixable:
+# the page must be re-clipped. Surface the dead links so they're visible.
+# (Fixed forward 2026-07-01: raw_writer.source_url_override records the
+# resolvable original; url_canonical.is_unservable_canonical is the guard.)
+_LI_DEAD_SRC_RE = re.compile(
+    r'^source:\s*"?https?://(?:www\.)?linkedin\.com/posts/'
+    r'(?:ugcpost|activity|share)-\d+/?"?\s*$', re.MULTILINE | re.IGNORECASE)
+dead_linkedin_src = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            rtext = fh.read(4096)
+    except (IOError, UnicodeDecodeError):
+        continue
+    if _LI_DEAD_SRC_RE.search(rtext):
+        dead_linkedin_src.append(
+            f"{os.path.basename(rf)}: source is a non-resolvable LinkedIn "
+            f"synthetic link (/posts/ugcpost-<id>) — re-clip the post to "
+            f"restore a working Source link")
+if dead_linkedin_src:
+    check("LinkedIn source link not resolvable (re-clip to fix)", dead_linkedin_src)
+
 # ═══════════════════════════════════════════════════
 header("7. OBSIDIAN RENDER VERIFICATION")
 # ═══════════════════════════════════════════════════

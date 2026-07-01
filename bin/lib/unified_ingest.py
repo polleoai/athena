@@ -91,6 +91,11 @@ class IngestInput:
     pdf_bytes: bytes = b""   # PDF bytes, if pre-fetched
     source_hint: str = ""    # caller's guess at source_type
     clipped_via: str = ""    # provenance tag
+    source_url: str = ""     # resolvable URL for the `source:` link when the
+                             # canonical form is an unservable dedup key
+                             # (LinkedIn synthetic /posts/ugcpost-<id>); empty
+                             # means "use canonical". See
+                             # url_canonical.is_unservable_canonical.
     extra: dict[str, Any] = field(default_factory=dict)
     fetch_if_missing: bool = True
     deep: bool = False       # use Playwright (deep mode) for JS-rendered
@@ -379,6 +384,7 @@ def _handle_webpage_from_markdown_body(
             extra=extra,
             canonicalize_url=False,  # already canonicalized in ingest()
             slug_override=asset_slug,  # match the asset dir localized above
+            source_url_override=(input.source_url.strip() or None),
         )
     except Exception as exc:  # raw_writer surfaces RawWriterError + degraded
         raise UnifiedIngestError(

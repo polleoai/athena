@@ -2,6 +2,17 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.6.2] — 2026-07-01
+
+Headline: **LinkedIn posts capture and link correctly.** Clipping a LinkedIn post that came from the share button used to save nothing (or a "clip processing failed" error) and, when it did save, left a Source link that opened LinkedIn's "Invalid post link" page. This release captures the post from the exact address you opened, records that resolvable link as the Source, and makes re-clipping an existing page heal its link in place. Athena-only patch; no change to the bundled assistant (Gryphon 2.6.1).
+
+### Fixed
+
+- **LinkedIn posts capture again.** Clipping or adding a LinkedIn post whose link came from the share button (or an in-app share) could land nothing — Athena saved LinkedIn's "Invalid post link" error page instead of the post. Athena now fetches the exact address your browser opened, so the post, its text, and its images come through. (A shared post that previously showed a recurring "clip processing failed" error now captures cleanly.)
+- **The Source link on a LinkedIn page now opens the post.** The saved page recorded an internal identifier as its Source link, which LinkedIn rejects with "Invalid post link." Athena now records the resolvable address you clipped, while still using the identifier behind the scenes to avoid duplicate pages. Older LinkedIn pages captured before this fix keep the broken link (the original address wasn't saved) — the health check now lists them so you can re-clip, and re-processing a page picks up a corrected link.
+- **No more phantom "clip processing failed" error.** When a clip was already handled by one background pass, a second pass could find the file gone and surface an alarming "clip not found" error. That case is now treated as already-done and stays silent.
+- **Re-clipping a page to fix its link now just works.** Re-clipping an already-saved page corrected the download but left the page's visible Source link untouched, so it looked like nothing happened. A re-clip now heals the page's Source link in place from the freshly-captured address — no separate refresh needed.
+
 ## [1.6.1] — 2026-06-27
 
 Headline: **pages built from embedded slides now capture their content, clips that used to fail now recover, and a security-hardened assistant.** When you clip a page whose real content lives in an embedded slide deck or document, Athena now pulls that embedded content in as its own page instead of saving an empty shell. Clips of script-heavy pages that previously failed with an error now fall back to fetching the page directly. Bundles **Gryphon 2.6.1**, which hardens the assistant against prompt injection on the Anthropic path.

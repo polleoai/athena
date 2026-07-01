@@ -36,7 +36,7 @@ from pathlib import Path
 
 from raw_parser import read_raw_frontmatter
 from raw_writer import DegradedContentError, RawWriterError, write_raw
-from url_canonical import canonicalize, source_kind, SourceKind
+from url_canonical import canonicalize, source_kind, SourceKind, is_unservable_canonical
 
 
 # Domains that the Web Clipper handles unreliably (URN-only URL forms,
@@ -135,6 +135,38 @@ def _run_capture_deep(url: str, vault_root: Path) -> Path | None:
     if not new_path.is_file():
         return None
     return new_path
+
+
+def _capture_deep_best(clipped_url: str, canonical_url: str, vault_root: Path) -> Path | None:
+    """Run capture-deep against the URL most likely to actually resolve.
+
+    The browser must navigate to the ORIGINAL clipped URL, not the canonical
+    dedup form. canonicalize() collapses LinkedIn's
+    /posts/<author>_<slug>-{share,activity,ugcPost}-<id>-<variant> forms to a
+    synthetic /posts/ugcpost-<id> key. That key is a stable *dedup* identity,
+    but LinkedIn does NOT serve it: a `share` or `activity` URN id dropped into
+    the `ugcpost-` slot returns LinkedIn's "Invalid post link" error page (the
+    numeric ids live in different URN namespaces). Capturing that error page
+    stranded the clip — witnessed on an emilyhartstone share post (2026-07-01)
+    and earlier May cases (deep-6129cae1, deep-91ad13). Same bug class as the
+    provos.org www-variant fetch fix: canonicalize for dedup, fetch the real
+    URL.
+
+    Navigate the original clipped URL first — it's the exact URL the user's
+    browser resolved — and fall back to the canonical form only if the
+    original yields nothing (capture-deep exited non-zero / wrote no clip).
+    The fallback almost never fires; it's cheap insurance.
+    """
+    seen: set[str] = set()
+    for candidate in (clipped_url, canonical_url):
+        candidate = (candidate or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        deep = _run_capture_deep(candidate, vault_root)
+        if deep is not None:
+            return deep
+    return None
 
 
 def _is_x_status_url(url: str) -> bool:
@@ -1041,7 +1073,7 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     # "thin LinkedIn" signals before deciding whether to re-fetch.
     # unified_ingest takes whatever body the caller provides.
     if _should_promote_to_playwright(canonical, fm):
-        deep_clip = _run_capture_deep(canonical, Path(vault_root))
+        deep_clip = _capture_deep_best(url, canonical, Path(vault_root))
         if deep_clip is not None:
             # Process the capture-deep clip in place of the Web Clipper one.
             # Recursive call is safe: the new clip's clipped_via field is
@@ -1159,6 +1191,11 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     )
 
     source_clipped_via = (fm.get("clipped_via") or "web-clipper").strip()
+    # When the canonical form is an unservable dedup key (LinkedIn synthetic
+    # /posts/ugcpost-<id>), record the original clip URL as the resolvable
+    # `source:` link — the slug/dedup identity stays canonical. Drop the
+    # tracking query (utm_*, share tokens); the bare post path resolves.
+    source_url = url.split("?", 1)[0] if is_unservable_canonical(canonical) else ""
     try:
         result = ingest(IngestInput(
             vault_root=Path(vault_root),
@@ -1166,6 +1203,7 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
             title=title,
             body=body,
             clipped_via=source_clipped_via,
+            source_url=source_url,
             fetch_if_missing=False,  # use the clip body; don't re-fetch
         ))
         raw_path = result.raw_path
@@ -1204,11 +1242,44 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
     return raw_path
 
 
+def _sync_wiki_source_link(content: str, vault_root: Path) -> str:
+    """Return `content` with its `url:` frontmatter and body `[Source](...)`
+    link rewritten to the backing raw's `source:` when they diverge.
+
+    The raw is the immutable provenance truth; the wiki link must mirror it. On
+    a re-clip that corrected an unservable link (a LinkedIn synthetic
+    /posts/ugcpost-<id> replaced by the resolvable original), the raw `source:`
+    is refreshed but the pre-existing wiki page silent-dedups — its visible
+    [Source] link would stay dead until a manual `kb refresh-wiki`. Syncing it
+    here (link fields only, no body re-synthesis) makes a re-clip visibly heal
+    the page on its own. No-op if raw_path/source is missing or already in sync.
+    """
+    rp = re.search(r'^raw_path:\s*"?([^"\n]+?)"?\s*$', content, re.MULTILINE)
+    if not rp:
+        return content
+    raw_file = Path(vault_root) / rp.group(1).strip()
+    try:
+        raw_head = raw_file.read_text(encoding="utf-8", errors="replace")[:4096]
+    except (OSError, ValueError):
+        return content
+    rs = re.search(r'^source:\s*"?([^"\n]+?)"?\s*$', raw_head, re.MULTILINE)
+    if not rs or not rs.group(1).strip():
+        return content
+    src = rs.group(1).strip()
+    new = re.sub(r'(^url:\s*)"?[^"\n]*?"?(\s*)$',
+                 lambda m: f'{m.group(1)}"{src}"{m.group(2)}',
+                 content, count=1, flags=re.MULTILINE)
+    new = re.sub(r'(\[Source\]\()https?://[^)]*(\))',
+                 lambda m: f'{m.group(1)}{src}{m.group(2)}',
+                 new, count=1)
+    return new
+
+
 def _touch_wiki_last_updated_for_url(vault_root, url):
-    """If a wiki page exists for `url`, set its `last_updated:` field to
-    today's date. Used after a re-clip to surface the updated capture
-    in date-grouped dashboards. No-op if no wiki page exists, or if the
-    field is already today's date."""
+    """After a re-clip on an existing page: (1) sync the wiki's Source link
+    from the (authoritative) raw `source:` so a corrected link heals without a
+    manual `kb refresh-wiki`, and (2) set `last_updated:` to today so the page
+    surfaces in date-grouped dashboards. No-op if no wiki page exists."""
     today = time.strftime("%Y-%m-%d")
     vault_root = Path(vault_root) if not isinstance(vault_root, Path) else vault_root
 
@@ -1245,27 +1316,37 @@ def _touch_wiki_last_updated_for_url(vault_root, url):
     else:
         return
 
-    # Rewrite last_updated to today (skip if already today)
     try:
         content = wiki_path.read_text(encoding="utf-8")
     except (IOError, UnicodeDecodeError):
         return
+    changed = False
+
+    # (1) Sync the Source link from the backing raw (authoritative). Runs
+    # independent of last_updated so a corrected link heals even when the date
+    # is already today.
+    synced = _sync_wiki_source_link(content, vault_root)
+    if synced != content:
+        content = synced
+        changed = True
+
+    # (2) Rewrite last_updated to today (skip if already today).
     m = re.search(r'^(last_updated:\s*)(\d{4}-\d{2}-\d{2})', content, re.MULTILINE)
     if not m:
         # No last_updated field — insert one after date_added if present.
         m2 = re.search(r'^(date_added:\s*\d{4}-\d{2}-\d{2}\s*)$', content, re.MULTILINE)
         if m2:
             content = content[:m2.end()] + f"\nlast_updated: {today}" + content[m2.end():]
-        else:
-            return
-    elif m.group(2) == today:
-        return  # already today; nothing to do
-    else:
+            changed = True
+    elif m.group(2) != today:
         content = content[:m.start()] + m.group(1) + today + content[m.end():]
-    try:
-        wiki_path.write_text(content, encoding="utf-8")
-    except IOError:
-        pass
+        changed = True
+
+    if changed:
+        try:
+            wiki_path.write_text(content, encoding="utf-8")
+        except IOError:
+            pass
 
 
 def _cli():
@@ -1273,8 +1354,22 @@ def _cli():
     if len(sys.argv) < 3:
         print("Usage: process_clip.py <vault_root> <clip_path>", file=sys.stderr)
         return 2
+    clip_arg = sys.argv[2]
+    # Concurrent-watcher no-op. The Obsidian plugin runs two clip watchers
+    # (immediate handler + retry watchdog) and the MCP server runs its own;
+    # each may spawn process_clip on the same file. When one pass already
+    # processed the clip (moved it to .processed/) or quarantined it (moved it
+    # to _failed/), a later pass finds the file gone. That is expected, not a
+    # failure — exit 0 silently so the plugin does not surface an alarming
+    # "Clip processing failed — clip not found" toast for a clip that was, in
+    # fact, already handled. (Witnessed 2026-07-01: a LinkedIn deep clip was
+    # quarantined by the first pass, then the retry watchdog re-ran on the
+    # moved path and toasted "clip not found".)
+    if not os.path.isfile(clip_arg):
+        print(f"clip already handled (not found, skipping): {clip_arg}", file=sys.stderr)
+        return 0
     try:
-        path = process_clip(sys.argv[2], sys.argv[1])
+        path = process_clip(clip_arg, sys.argv[1])
     except ProcessClipError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

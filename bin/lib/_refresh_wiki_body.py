@@ -85,6 +85,19 @@ if not os.path.exists(os.path.join(KB, raw_path)):
     print("  Re-capture from URL with `kb add <url>` instead.")
     sys.exit(1)
 
+# Prefer the raw's `source:` as the authoritative provenance link. The raw is
+# immutable truth; the wiki `url:` must mirror it. This heals a corrected raw
+# source (e.g. a LinkedIn unservable-canonical /posts/ugcpost-<id> replaced by
+# the resolvable original) on refresh instead of persisting the stale wiki url.
+try:
+    with open(os.path.join(KB, raw_path), 'r', encoding='utf-8', errors='replace') as _rf:
+        _raw_head = _rf.read(4096)
+    _rs = re.search(r'^source:\s*"?([^"\n]+?)"?\s*$', _raw_head, re.MULTILINE)
+    if _rs and _rs.group(1).strip():
+        url = _rs.group(1).strip()
+except OSError:
+    pass
+
 print(f"Refreshing: {os.path.relpath(page_path, KB)}")
 print(f"  Raw:   {raw_path}")
 print(f"  URL:   {url or '(none)'}")

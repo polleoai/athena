@@ -322,6 +322,29 @@ def canonicalize(raw_url: str) -> CanonicalizeResult:
     )
 
 
+def is_unservable_canonical(canonical_url: str) -> bool:
+    """True if `canonical_url` is a dedup KEY the origin host does not serve.
+
+    Most canonical forms are just the original minus tracking/www — still
+    clickable. LinkedIn is the exception: `_normalize_linkedin` collapses the
+    `/posts/<author>_<slug>-{share,activity,ugcPost}-<id>` forms to a synthetic
+    `/posts/ugcpost-<id>` key. That key is stable for dedup, but LinkedIn does
+    NOT serve it — opening it returns "Invalid post link" (the URN *type* was
+    thrown away, so a `share`/`activity` id sits in the `ugcpost-` slot). Such
+    canonicals are fine as identity but must not be shown as the clickable
+    `source:` link; callers should record the original resolvable URL instead.
+    """
+    if not canonical_url or not isinstance(canonical_url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(canonical_url)
+    except Exception:
+        return False
+    if not (parsed.netloc == "linkedin.com" or parsed.netloc.endswith(".linkedin.com")):
+        return False
+    return bool(_LINKEDIN_POSTS_URN_ONLY_RE.match(parsed.path))
+
+
 # ─── Self-test ───────────────────────────────────────────────────────
 # Run as: python3 bin/lib/url_canonical.py
 
