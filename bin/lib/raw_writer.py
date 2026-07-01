@@ -126,6 +126,7 @@ def write_raw(
     extra: dict[str, Any] | None = None,
     canonicalize_url: bool = True,
     slug_override: str | None = None,
+    source_url_override: str | None = None,
 ) -> Path:
     """Write a raw artifact with full schema validation.
 
@@ -144,6 +145,12 @@ def write_raw(
             Reserved keys (title, source, captured_at) are silently skipped.
         canonicalize_url: If True (default), canonicalize the URL before
             storage. Set False only when the caller has already canonicalized.
+        source_url_override: If set, written to the `source:` frontmatter in
+            place of the (canonical) URL, WITHOUT affecting slug derivation or
+            the storage path. Use when the canonical form is a dedup key the
+            origin host does not serve (LinkedIn synthetic /posts/ugcpost-<id>)
+            so the clickable `source:` stays resolvable while the slug/dedup
+            identity remains canonical. See url_canonical.is_unservable_canonical.
 
     Returns:
         Absolute path of the written file.
@@ -203,7 +210,12 @@ def write_raw(
         "captured_at": _now_iso(),
     }
     if canonical_url:
-        fm_dict["source"] = canonical_url
+        # The slug/dedup identity is always `canonical_url` (below); the
+        # `source:` link, however, must stay resolvable. When the caller passes
+        # a source_url_override (canonical is an unservable dedup key, e.g. a
+        # LinkedIn synthetic /posts/ugcpost-<id>), record that instead.
+        override = (source_url_override or "").strip()
+        fm_dict["source"] = override or canonical_url
     if extra:
         for k, v in extra.items():
             if k in _RESERVED_KEYS:

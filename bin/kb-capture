@@ -561,9 +561,18 @@ def resolve_x_article(data: dict) -> bool:
     return False
 
 
-def resolve_linkedin(url: str, state: dict):
+def resolve_linkedin(url: str, state: dict, nav_url: str = ""):
     """LinkedIn posts: auto-promote to capture-deep if a Playwright session is
-    present, else extract og:description. Returns (maybe-new-url, should_exit)."""
+    present, else extract og:description. Returns (maybe-new-url, should_exit).
+
+    `url` is the canonical dedup/slug identity; `nav_url` (defaults to `url`) is
+    the URL to actually FETCH. They differ for LinkedIn: canonicalize() collapses
+    /posts/<author>_<slug>-{share,activity,ugcPost}-<id> to a synthetic
+    /posts/ugcpost-<id> key, which LinkedIn does NOT serve for share/activity
+    URNs ("Invalid post link"). Fetch the original URL the user's browser
+    resolved; keep the canonical for identity. Mirrors
+    process_clip._capture_deep_best and the provos.org www-variant fix."""
+    nav = nav_url or url
     auth_marker = os.path.join(os.path.expanduser("~"), ".athena",
                                "playwright-userdata", ".athena-auth-confirmed")
     if (os.path.isfile(auth_marker)
@@ -571,7 +580,7 @@ def resolve_linkedin(url: str, state: dict):
         print("  Auto-promoting LinkedIn URL to capture-deep (Playwright session present)...")
         env = dict(os.environ, KB_ROOT=KB_ROOT)
         kb_bin = os.path.join(KB_ROOT, "bin", "kb")
-        proc = subprocess.run([PYBIN, kb_bin, "capture-deep", url], cwd=KB_ROOT, env=env)
+        proc = subprocess.run([PYBIN, kb_bin, "capture-deep", nav], cwd=KB_ROOT, env=env)
         if proc.returncode == 0:
             print("  capture-deep succeeded — exiting kb-capture (autoingest handles the clip)")
             return url, True
@@ -580,7 +589,7 @@ def resolve_linkedin(url: str, state: dict):
 
     ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    li_raw = _curl(["-sL", "-A", ua, url])
+    li_raw = _curl(["-sL", "-A", ua, nav])
     if not li_raw:
         print("  Could not reach LinkedIn")
         return url, False
@@ -618,7 +627,7 @@ def resolve_linkedin(url: str, state: dict):
     # og:description empty — try arcus (Playwright).
     print("  og:description empty — trying arcus (Playwright)...")
     proc = _run([PYBIN, os.path.join(KB_ROOT, "bin", "lib", "arcus_html.py"),
-                 "--vault", KB_ROOT, "--url", url, "--print-body"],
+                 "--vault", KB_ROOT, "--url", nav, "--print-body"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, errors="replace")
     li_pw = proc.stdout if proc.returncode == 0 else ""
@@ -1473,6 +1482,12 @@ def main(argv: list[str]) -> int:
     else:
         die("invalid URL: missing scheme (expected http:// or https://)")
 
+    # Preserve the raw pre-canonicalize URL as the FETCH target for hosts whose
+    # canonical dedup form isn't a servable URL (LinkedIn share/activity URNs →
+    # synthetic /posts/ugcpost-<id>, which LinkedIn rejects). canonicalize() is
+    # for identity/dedup/slug; the network layer must hit the URL the user's
+    # browser actually resolved.
+    raw_input_url = url
     url = canonicalize_url(url)
 
     original_url = url
@@ -1484,7 +1499,7 @@ def main(argv: list[str]) -> int:
         url = resolve_tweet(url, original_url, state)
 
     if "linkedin.com/posts/" in url or "linkedin.com/pulse/" in url:
-        new_url, should_exit = resolve_linkedin(url, state)
+        new_url, should_exit = resolve_linkedin(url, state, nav_url=raw_input_url)
         if should_exit:
             _cleanup()
             return 0

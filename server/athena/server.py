@@ -999,7 +999,7 @@ def _process_clip(vault_root, filepath):
         try:
             sys.path.insert(0, os.path.join(vault_root, 'bin', 'lib'))
             from process_clip import (  # type: ignore
-                _should_promote_to_playwright, _run_capture_deep,
+                _should_promote_to_playwright, _capture_deep_best,
             )
             from url_canonical import canonicalize as _promote_canon  # type: ignore
             from pathlib import Path as _PromotePath
@@ -1007,7 +1007,11 @@ def _process_clip(vault_root, filepath):
             _fm = {'clipped_via': _clip_clipped_via(filepath)}
             if _should_promote_to_playwright(_canonical, _fm):
                 logger.info(f"Promoting social clip to capture-deep: {fname}")
-                _deep = _run_capture_deep(_canonical, _PromotePath(vault_root))
+                # Navigate the ORIGINAL clipped URL, not the synthetic canonical
+                # /posts/ugcpost-<id> form — LinkedIn rejects the latter for
+                # share/activity URNs ("Invalid post link"). See
+                # process_clip._capture_deep_best.
+                _deep = _capture_deep_best(url, _canonical, _PromotePath(vault_root))
                 if _deep is not None:
                     try:
                         os.remove(filepath)  # drop thin trigger; watcher ingests the deep clip
