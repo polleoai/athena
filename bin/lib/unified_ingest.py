@@ -292,12 +292,17 @@ def _handle_webpage_from_markdown_body(
     from process_clip import (
         _is_bait_title, _derive_title_from_body, _best_title_from_url_slug,
         _strip_linkedin_chrome, _rewrite_twimg_images, _strip_blob_videos,
-        _queue_referenced_urls,
+        _queue_referenced_urls, _strip_share_widgets,
     )
     import re as _re
 
     body = input.body
     title = input.title or ""
+
+    # Drop "share this page" widget links (X/LinkedIn/Facebook/mailto intent
+    # URLs) that browser/DOM capture pulls in as body text — page chrome, not
+    # content. Runs before title derivation and downstream strips.
+    body = _strip_share_widgets(body)
 
     # LinkedIn chrome stripping — keep behavior identical to process_clip.
     if "linkedin.com" in canonical_url:

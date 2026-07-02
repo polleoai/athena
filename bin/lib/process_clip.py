@@ -686,6 +686,50 @@ def _strip_blob_videos(body: str, source_url: str = "") -> str:
     return _BLOB_VIDEO_RE.sub(replacement, body)
 
 
+# "Share this page" widget links — X/LinkedIn/Facebook/Reddit/Pinterest/WhatsApp/
+# Telegram intent URLs plus mailto: share links. Browser/DOM capture (the Web
+# Clipper's Electron path) sweeps the page's share bar in as body text.
+_SHARE_WIDGET_HOST_RE = re.compile(
+    r'https?://(?:'
+    r'(?:www\.)?(?:x|twitter)\.com/intent/'
+    r'|(?:[\w.-]+\.)?linkedin\.com/(?:shareArticle|sharing/share-offsite|cws/share)'
+    r'|(?:www\.)?facebook\.com/(?:sharer|dialog/)'
+    r'|(?:www\.)?reddit\.com/submit'
+    r'|(?:www\.)?pinterest\.[\w.]+/pin/create'
+    r'|(?:api\.whatsapp\.com|wa\.me)/'
+    r'|(?:t|telegram)\.me/share'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def _strip_share_widgets(body: str) -> str:
+    """Drop lines that are just a social-share widget link — the "share this
+    page" bar (X / LinkedIn / Facebook / Reddit / email intent URLs) that
+    browser/DOM capture pulls in as body text. These are page chrome, not
+    content. Match is start-anchored on the de-bulleted line so a legitimate
+    sentence that merely mentions such a URL mid-text is untouched.
+
+    Witnessed 2026-07-01: a cloud.google.com blog clip landed the share bar as
+    a 4-item bullet list (X intent / LinkedIn shareArticle / Facebook sharer /
+    mailto) right under the title. See test_strip_share_widgets.
+    """
+    kept = []
+    dropped = False
+    for line in body.splitlines():
+        stripped = line.strip().lstrip('-*').strip()
+        low = stripped.lower()
+        if _SHARE_WIDGET_HOST_RE.match(stripped) or low.startswith(('mailto:?subject=', 'mailto:?body=')):
+            dropped = True
+            continue
+        kept.append(line)
+    if not dropped:
+        return body  # exact no-op when there's nothing to strip
+    cleaned = "\n".join(kept)
+    # Collapse the blank gaps left by removed lines.
+    return re.sub(r'\n{3,}', '\n\n', cleaned)
+
+
 # Conservative masthead-title fallback. The Web Clipper sometimes lifts a
 # site/org masthead (e.g. "Berkeley RDI") as the page <title> while the real
 # article headline sits in a body H1. When that H1 matches the URL's slug far

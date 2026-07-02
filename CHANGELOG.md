@@ -2,6 +2,15 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [1.6.3] — 2026-07-01
+
+Headline: **cleaner saved web articles.** Fetched pages used to drag in the surrounding page chrome — the "share this page" bar (X / LinkedIn / Facebook / email buttons), the article title repeated two or three times with a "| Site Name" masthead, a section breadcrumb, and stray empty bullets. v1.6.3 trims all of that at capture, so a saved article opens on the article. Athena-only patch; bundled assistant unchanged (Gryphon 2.6.1).
+
+### Fixed
+
+- **"Share this page" buttons no longer land in your saved copy.** Clipping an article whose page has a social-share bar (X / LinkedIn / Facebook / email "share" buttons) used to pull those share links into the saved text as a stray list. They're now stripped at capture, so the saved copy is just the article.
+- **Cleaner saved articles — no repeated title, masthead, or breadcrumb.** Fetched web articles sometimes carried the page's own header into the saved copy: the title shown two or three times (once with a "| Site Name" masthead), a site-section breadcrumb, and empty leftover bullets. That chrome is now trimmed so the saved copy opens on the actual article, and the page title drops the trailing site name.
+
 ## [1.6.2] — 2026-07-01
 
 Headline: **LinkedIn posts capture and link correctly.** Clipping a LinkedIn post that came from the share button used to save nothing (or a "clip processing failed" error) and, when it did save, left a Source link that opened LinkedIn's "Invalid post link" page. This release captures the post from the exact address you opened, records that resolvable link as the Source, and makes re-clipping an existing page heal its link in place. Athena-only patch; no change to the bundled assistant (Gryphon 2.6.1).

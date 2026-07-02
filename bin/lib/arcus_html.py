@@ -133,6 +133,83 @@ def _run_asset_download(
             pass
 
 
+_MASTHEAD_SUFFIX_RE = re.compile(r'\s*[|–—\-]\s*[^|–—]{1,40}$')
+
+
+def _strip_masthead(title: str) -> str:
+    """Drop a trailing site-masthead segment from a page title:
+    'Article — Multi-Node … | Google Cloud Blog' → 'Article — Multi-Node …'.
+
+    Conservative: only strips the LAST ` | segment` / ` - segment` / ` — segment`
+    and only when what remains is still substantial (>= 20 chars and >= 4 words),
+    so short titles or legitimately hyphenated ones are left alone.
+    """
+    t = title.strip()
+    m = _MASTHEAD_SUFFIX_RE.search(t)
+    if not m:
+        return t
+    head = t[:m.start()].strip()
+    if len(head) >= 20 and len(head.split()) >= 4:
+        return head
+    return t
+
+
+def _clean_webpage_body(body: str, title: str = "") -> str:
+    """Strip common webpage-extraction chrome from an arcus body:
+
+      1. A leading block of the page's own header — heading lines that duplicate
+         the title (masthead suffix / '&amp;' entity and all) plus a short
+         site-section breadcrumb sandwiched between them. The raw template
+         already emits one '# {title}' H1, so this is redundant.
+      2. Empty list bullets ('-' / '*' alone) — residue of share/nav buttons
+         whose text/links the extractor dropped but whose <li> markers remain.
+
+    Conservative: (1) only touches the TOP of the body and stops at the first
+    real content line; (2) empty-bullet removal is unambiguous.
+    Anchor 2026-07-01: cloud.google.com blog → title ×2 + 'Developers &
+    Practitioners' crumb + four empty share bullets.
+    """
+    import html as _html
+
+    def _norm(s: str) -> str:
+        s = _html.unescape(s)
+        s = re.sub(r'^#+\s*', '', s.strip())
+        s = _strip_masthead(s)
+        return re.sub(r'\s+', ' ', s).strip().lower()
+
+    def _is_dup_title_heading(line: str) -> bool:
+        s = line.strip()
+        if not s.startswith('#') or not tnorm:
+            return False
+        n = _norm(s)
+        return bool(n) and (n == tnorm or n in tnorm or tnorm in n)
+
+    tnorm = _norm(title) if title else ""
+    lines = body.split("\n")
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s:
+            i += 1
+            continue
+        if _is_dup_title_heading(lines[i]):
+            i += 1
+            continue
+        # Short breadcrumb — strip only if a duplicate-title heading follows soon.
+        if (not s.startswith('#') and len(s.split()) <= 4
+                and not s.endswith((".", ":", "!", "?"))):
+            nxt = next((l for l in lines[i + 1:i + 4] if l.strip()), "")
+            if _is_dup_title_heading(nxt):
+                i += 1
+                continue
+        break
+    kept = lines[i:]
+
+    out = [ln for ln in kept if not re.fullmatch(r'\s*[-*]\s*', ln)]
+    cleaned = re.sub(r'\n{3,}', '\n\n', "\n".join(out)).strip()
+    return cleaned
+
+
 def _build_athena_body(
     arcus_body: str,
     *,
@@ -358,7 +435,7 @@ def ingest_html_url(
     if not arcus_body.strip():
         raise ArcusHtmlError(f"arcus returned empty content for {url}")
 
-    title = _derive_title(metadata.get("title", ""), arcus_body, url)
+    title = _strip_masthead(_derive_title(metadata.get("title", ""), arcus_body, url))
 
     # The arcus-derived slug — used for asset_download's page-slug arg so
     # local image files land under raw/assets/<slug>/.
@@ -371,6 +448,10 @@ def ingest_html_url(
         arcus_body = _run_asset_download(
             vault=vault, slug=slug_hint, content=arcus_body,
         )
+
+    # Strip page-header chrome (duplicate title / breadcrumb / empty share
+    # bullets) the extractor carried into the body.
+    arcus_body = _clean_webpage_body(arcus_body, title)
 
     content_lines = arcus_body.count("\n") + 1
     body = _build_athena_body(
