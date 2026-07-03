@@ -2,6 +2,25 @@
 
 All notable changes to the Athena Obsidian plugin are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+## [1.6.5] — 2026-07-03
+
+Headline: **the bundled assistant gets safer, and slide-deck talks capture cleanly.** This release moves the bundled Gryphon assistant to 2.7.0, which now asks before running package-install commands and flags reverse-shell command shapes — closing two common ways a booby-trapped project tries to get code onto your machine. reveal.js slide-deck extraction moves to the upstream capture engine (more reliable, and nested vertical slides are now captured), and re-captures no longer spawn duplicate pages.
+
+### Security
+
+- **The bundled assistant now blocks package installs by default.** Gryphon 2.7.0 flags commands that install software (`pip`, `npm` / `pnpm` / `yarn` / `bun`, `gem`, `cargo`, `go`, `brew`, `apt` / `dnf` / `yum`, `conda`, `poetry`, and similar) for your approval before they run — even when you've set auto-approve — because working in your vault never needs to install software. This closes a common attack: an innocent-looking "install the requirements" step that quietly does more than it claims. A **Block package installation** switch (Settings → Security) is on by default; turn it off if a workflow genuinely needs to install packages.
+- **Reverse-shell and payload-staging commands are now recognized.** Command shapes used to open a reverse shell — a live connection that hands remote control of your machine to someone else — plus the DNS lookups sometimes used to fetch a hidden payload, now surface for your approval instead of running silently. Ordinary interactive shells and everyday commands are unaffected.
+
+### Changed
+
+- **Slide-deck talk pages capture more reliably.** reveal.js decks now extract through the upstream capture engine instead of an Athena-side fallback — cleaner per-slide text, and nested vertical slides (a slide inside a slide) are captured instead of dropped or merged.
+
+### Fixed
+
+- **Re-capturing a page no longer creates a duplicate.** When you re-clip or re-add a source and the title comes out slightly different the second time, Athena used to create a second page for the same source. It now recognizes the existing page by its underlying saved file and updates that one instead of spawning a duplicate.
+
 ## [1.6.3] — 2026-07-01
 
 Headline: **cleaner saved web articles.** Fetched pages used to drag in the surrounding page chrome — the "share this page" bar (X / LinkedIn / Facebook / email buttons), the article title repeated two or three times with a "| Site Name" masthead, a section breadcrumb, and stray empty bullets. v1.6.3 trims all of that at capture, so a saved article opens on the article. Athena-only patch; bundled assistant unchanged (Gryphon 2.6.1).

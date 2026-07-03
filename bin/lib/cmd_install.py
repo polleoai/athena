@@ -24,7 +24,7 @@ from typing import List
 # `dependencies` (arcus is the content-extraction kernel) plus yt-dlp, which the
 # capture layer shells out to for video sources.
 PY_DEPS = [
-    "arcus-provider-runtime[html,pdf,office]>=0.6.0",
+    "arcus-provider-runtime[html,pdf,office]>=0.7.0",
     "mcp>=1.0",
     "sqlite-vec>=0.1.0",
     "yt-dlp",

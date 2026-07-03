@@ -18,6 +18,12 @@ This file proves the migration preserved behavior, two ways:
      direct "functions the same as before the refactor" guard. It self-skips
      if the old blob can't be loaded (non-git checkout / bundled plugin copy).
 
+     One deliberate frontmatter exception: the post-migration 1.6.2
+     resolvable-Source fix records the resolvable ORIGINAL url (not the
+     synthetic canonical) for an unservable-canonical clip (LinkedIn
+     /posts/{ugcpost,activity,share}-<id>). The LinkedIn fixture asserts that
+     intended `source` divergence explicitly instead of demanding old==new.
+
   2. TestWebpagePipelineCharacterization — durable property assertions on the
      CURRENT path for each transform, so a future edit to the orchestration
      that breaks one transform fails loudly with a readable message even
@@ -283,7 +289,7 @@ class TestOldVsNewEquivalence(unittest.TestCase):
         new_raw = process_clip_new.process_clip(_write_clip(new_vault, fixture), new_vault)
         return Path(old_raw), Path(new_raw), old_vault, new_vault
 
-    def _assert_equivalent(self, fixture_name: str):
+    def _assert_equivalent(self, fixture_name: str, source_may_differ: bool = False):
         fixture = _ALL_FIXTURES[fixture_name]
         old_raw, new_raw, old_vault, new_vault = self._run_both(fixture)
 
@@ -301,9 +307,30 @@ class TestOldVsNewEquivalence(unittest.TestCase):
         self.assertEqual(_body_of(old_raw), _body_of(new_raw),
                          f"{fixture_name}: body diverged after migration")
 
-        # Non-date frontmatter must match (title fallback, clipped_via, url…).
-        self.assertEqual(_frontmatter_without_dates(old_raw),
-                         _frontmatter_without_dates(new_raw),
+        old_fm = _frontmatter_without_dates(old_raw)
+        new_fm = _frontmatter_without_dates(new_raw)
+
+        if source_may_differ:
+            # The 1.6.2 resolvable-Source fix landed AFTER the 2026-05 migration
+            # and intentionally changed source recording: for an unservable
+            # canonical (LinkedIn /posts/{ugcpost,activity,share}-<id>) the new
+            # path records the resolvable ORIGINAL url, where the pre-migration
+            # path stored the synthetic canonical. That divergence is the fix,
+            # not a migration regression — so compare the rest of the
+            # frontmatter and pin the new `source` to the resolvable original.
+            old_src = old_fm.pop("source", None)
+            new_src = new_fm.pop("source", None)
+            self.assertEqual(
+                new_src, fixture["source"].split("?", 1)[0],
+                f"{fixture_name}: new pipeline must record the resolvable original Source")
+            self.assertNotEqual(
+                new_src, old_src,
+                f"{fixture_name}: expected the 1.6.2 Source divergence from the "
+                f"pre-migration synthetic canonical")
+
+        # Remaining (or all) non-date frontmatter must match (title fallback,
+        # clipped_via, url…).
+        self.assertEqual(old_fm, new_fm,
                          f"{fixture_name}: frontmatter diverged after migration")
 
         # Same referenced URLs auto-queued.
@@ -311,7 +338,10 @@ class TestOldVsNewEquivalence(unittest.TestCase):
                          f"{fixture_name}: auto-queued URLs diverged")
 
     def test_linkedin_clip_equivalent(self):
-        self._assert_equivalent("linkedin")
+        # source_may_differ: LinkedIn is an unservable canonical, so the 1.6.2
+        # fix deliberately records a different (resolvable) Source than the
+        # pre-migration path. See _assert_equivalent.
+        self._assert_equivalent("linkedin", source_may_differ=True)
 
     def test_xcom_clip_equivalent(self):
         self._assert_equivalent("xcom")
