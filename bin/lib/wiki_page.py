@@ -1905,7 +1905,13 @@ def create_wiki_page(vault_path, raw_path, url=None, llm_result=None,
     # Skipped under overwrite=True: refresh-wiki explicitly intends to
     # rewrite the existing page, not avoid creating a duplicate.
     if not overwrite:
-        existing_for_url = _find_wiki_page_for_url(url, vault_path)
+        # Two identity checks: URL (via url-resolved.tsv) and raw_path (a full
+        # scan of the source subdir). raw_path is the more reliable of the two —
+        # a re-capture reuses the raw slug even when the LLM re-titles, so it
+        # catches the duplicate-on-retitle case the URL index misses when the
+        # tsv row is stale/absent.
+        existing_for_url = (_find_wiki_page_for_url(url, vault_path)
+                            or _find_wiki_page_for_raw_path(raw_path, vault_path, wiki_subdir))
         if existing_for_url:
             return {'status': 'exists', 'page_name': os.path.splitext(os.path.basename(existing_for_url))[0],
                     'summary': None,
@@ -2054,6 +2060,43 @@ def _find_wiki_page_for_url(url, vault_path):
                         return candidate
                 # TSV row pointed at a wiki file that no longer exists; keep
                 # scanning in case a later row has a live page.
+    except Exception:
+        return None
+    return None
+
+
+def _find_wiki_page_for_raw_path(raw_path, vault_path, subdir=None):
+    """Return absolute path of an existing wiki page whose `raw_path:` matches
+    `raw_path`, or None.
+
+    raw_path is the STABLE identity of a source: a re-capture writes the same
+    raw slug even when the LLM re-titles the page on re-synthesis. The URL index
+    (`_find_wiki_page_for_url`) depends on url-resolved.tsv being present and the
+    URL canonicalizing identically — when it isn't, a re-capture with a new
+    title slips past every collision check and writes a duplicate page on the
+    same raw (witnessed repeatedly 2026-07-01: LinkedIn + cloud.google.com
+    re-captures). Matching on raw_path closes that gap. Scans only the relevant
+    source subdir when known; returns None on any error so create still proceeds.
+    """
+    if not raw_path:
+        return None
+    want = raw_path.replace('\\', '/').strip().strip('"').strip("'")
+    subs = [subdir] if subdir else _WIKI_SOURCE_DIRS
+    pat = re.compile(r'^raw_path:\s*"?([^"\n]+?)"?\s*$', re.MULTILINE)
+    try:
+        for sub in subs:
+            d = os.path.join(vault_path, sub)
+            if not os.path.isdir(d):
+                continue
+            for fp in glob.glob(os.path.join(d, '*.md')):
+                try:
+                    with open(fp, 'r', encoding='utf-8', errors='replace') as fh:
+                        head = fh.read(2048)
+                except OSError:
+                    continue
+                m = pat.search(head)
+                if m and m.group(1).replace('\\', '/').strip() == want:
+                    return fp
     except Exception:
         return None
     return None

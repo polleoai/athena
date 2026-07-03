@@ -30,7 +30,9 @@ dependencies = [
     # (xlsx→GFM tables, pptx→per-slide, docx→headings) via openpyxl/
     # python-pptx/python-docx — richer output, same in-process Factory.run
     # contract. Verified end-to-end (PDF/HTML/office); no athena code change.
-    "arcus-provider-runtime[html,pdf,office]>=0.6.0",
+    # 0.7.0 adds native reveal.js slide-deck extraction to HtmlProvider —
+    # retires athena's bin/lib/slide_deck.py fallback (see arcus#8).
+    "arcus-provider-runtime[html,pdf,office]>=0.7.0",
 ]
 
 [project.optional-dependencies]

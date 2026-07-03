@@ -382,31 +382,9 @@ def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], d
     extractor_detail = payload.get("extractor_detail") or {}
     images = extractor_detail.get("images") or []
 
-    # reveal.js slide decks (talk pages embedded via <iframe>) aren't articles:
-    # arcus either returns empty OR extracts them messily, leaving raw HTML
-    # entities (&middot;, &amp;) and concatenated headings. The slide text lives
-    # cleanly in the static HTML <section>s. Prefer a structured slide_deck
-    # render when the page is a reveal.js deck. Gate the extra HTML fetch on a
-    # cheap signal so clean captures pay nothing: an empty body, or arcus output
-    # still carrying raw HTML entities (the exact mis-extraction fingerprint).
-    # Single-format extraction is arcus's domain long-term; this is an
-    # athena-side fallback (same precedent as the deep-mode path above).
-    _entity_smell = re.search(r"&(?:middot|amp|lt|gt|nbsp|#\d+);", arcus_body)
-    if not arcus_body.strip() or _entity_smell:
-        try:
-            import embed_discovery  # type: ignore
-            import slide_deck  # type: ignore
-
-            page_html = embed_discovery.fetch_html(url)
-            deck_md = slide_deck.extract_slide_deck(page_html or "", url=url)
-            if deck_md:
-                arcus_body = deck_md
-                if not metadata.get("title"):
-                    first = deck_md.lstrip().splitlines()[0]
-                    if first.startswith("# "):
-                        metadata = {**metadata, "title": first[2:].strip()}
-        except Exception:
-            pass
+    # reveal.js slide decks (talk pages embedded via <iframe>) are now
+    # extracted natively by arcus's HtmlProvider (>=0.7.0) — no athena-side
+    # post-processing needed. See CHANGELOG / arcus#8.
 
     return arcus_body, images, metadata
 

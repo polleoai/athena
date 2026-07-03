@@ -12,7 +12,7 @@ The full architecture reference is in `docs/athena-architecture.md`.
 
 Per-format extraction (HTML pages incl. X.com tweets, PDFs, DOCX/XLSX/PPTX/EPUB, YouTube transcripts) is delegated to **arcus** — the published `arcus-provider-runtime` package (open-sourced at polleoai/arcus, MIT; dev source lives at `~/Projects/arcus/`). Athena imports `arcus.provider_runtime` and calls its `Factory.run(input, out_dir=...)` via three thin adapter modules: `bin/lib/arcus_html.py`, `bin/lib/arcus_file.py`, `bin/lib/arcus_video.py`. Each adapter wraps arcus's output into athena's raw .md format and writes via `raw_writer.write_raw`.
 
-**Install prerequisite:** `pip install --user "arcus-provider-runtime[html,pdf,office]"` (resolves from PyPI) plus `python3 -m playwright install chromium`. The athena `pyproject.toml` declares `arcus-provider-runtime[html,pdf,office]>=0.6.0` as a required dependency. (A local editable install — `pip install -e ~/Projects/arcus/packages/provider-runtime[...]` — is a dev-only convenience, not the end-user path.)
+**Install prerequisite:** `pip install --user "arcus-provider-runtime[html,pdf,office]"` (resolves from PyPI) plus `python3 -m playwright install chromium`. The athena `pyproject.toml` declares `arcus-provider-runtime[html,pdf,office]>=0.7.0` as a required dependency. (A local editable install — `pip install -e ~/Projects/arcus/packages/provider-runtime[...]` — is a dev-only convenience, not the end-user path.)
 
 **Athena owns** (kept in athena's bin/lib/): ingest orchestration, vault state, wiki generation, topic + entity pages, lint, search, URL routing (`bin/lib/url_detect.py`), playlist detection, paper discovery, dead-URL recording. Anything multi-source or vault-aware stays in athena.
 
