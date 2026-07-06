@@ -16,14 +16,27 @@ import time
 from typing import List
 
 
+def _frozen() -> bool:
+    """True under a Nuitka/PyInstaller binary (no on-disk .py, no python exe)."""
+    return getattr(sys, "frozen", False) or "__compiled__" in globals()
+
+
 def _capture(root: str, url: str, desc: str) -> bool:
-    """Run bin/kb-capture, mirroring the Bash arm. Returns success."""
+    """Run capture, mirroring the Bash arm. Returns success.
+
+    Frozen binary: in-process via capture.run_capture() (no subprocess — the
+    binary can't re-exec a .py). Source/dev mode keeps the subprocess call, so
+    the test_kb_parity stub and Bash parity stay intact. See cmd_add._capture.
+    """
+    extra = ["--desc", desc] if desc else []
+    if _frozen():
+        import capture  # noqa: E402 — lazy so source mode never imports it
+        sys.stdout.flush()
+        return capture.run_capture(url, *extra, vault_root=root) == 0
     capture = os.path.join(root, "bin", "kb-capture")
     # kb-capture is now cross-platform Python — run via the interpreter (no
     # "/bin/bash", which ENOENT'd on native Windows). See cmd_add._capture.
-    cmd = [sys.executable, capture, url]
-    if desc:
-        cmd += ["--desc", desc]
+    cmd = [sys.executable, capture, url, *extra]
     # Flush our own buffered stdout first so the child's inherited-fd writes
     # interleave in the same order Bash produced (Bash had no buffer between
     # its `echo "$url"` and the kb-capture child). Without this, our buffered

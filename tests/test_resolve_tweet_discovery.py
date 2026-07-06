@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PY_CAPTURE = ROOT / "bin" / "kb-capture"
+PY_CAPTURE = ROOT / "bin" / "lib" / "capture.py"
 LIB = ROOT / "bin" / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))

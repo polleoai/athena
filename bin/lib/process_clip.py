@@ -589,6 +589,70 @@ _LINKEDIN_POST_IMAGE = re.compile(
 )
 
 
+_LINKEDIN_ACTOR_LINK = re.compile(
+    # LinkedIn's byline "profile card" — an image-link + a name-link whose
+    # targets carry LinkedIn's feed tracking params (trk=...feed-actor or
+    # trk=public_post). Renders as `[<img alt="View profile for X">](url)` and
+    # `[X](url)`. On browser-capture clips (no `## Feed post` marker) the leading
+    # strips don't fire and this chrome survives inline. The trk= feed-actor /
+    # public_post signature is unambiguous UI chrome — never legitimate post
+    # content — so these links are removed wherever they appear. The link TEXT
+    # (an <img> tag or the author name) goes with them: the author is recorded
+    # in frontmatter, and the image is a profile photo, not post content.
+    # Inner text allows one level of nested `![alt](img)` (markdown image links).
+    # Signature is the `actor` token — `feed-actor` (byline) and `comment_actor`
+    # (commenter). NOT the broad `public_post` namespace: LinkedIn stamps
+    # `public_post` on every link on the page including `public_post-text` and
+    # `public_post_comment-text` (which wrap the actual post/comment TEXT), plus
+    # mentions/hashtags/reactions/CTAs — matching those would DELETE real content.
+    r'\[(?:[^\[\]]|\[[^\]]*\]\([^)]*\))*\]'
+    r'\(https?://[^)]*?\btrk=[^)]*?[_-]actor[^)]*\)',
+    re.IGNORECASE,
+)
+
+
+_LINKEDIN_TRK_BARE_URL = re.compile(
+    # A whole line that IS a bare LinkedIn tracking URL — the comment-author
+    # profile links (`?trk=public_post_comment_actor-image`) and any other
+    # feed-actor / public_post tracking link the Web Clipper leaves as a naked
+    # URL rather than a markdown link. Same unambiguous chrome signature as
+    # _LINKEDIN_ACTOR_LINK; removing the line drops pure UI noise, not content.
+    r'^[ \t]*https?://[^\s)]*\btrk=[^\s)]*?[_-]actor[^\s)]*[ \t]*$',
+    re.MULTILINE,
+)
+
+
+_LINKEDIN_RESIDUAL_CHROME = re.compile(
+    # Whole-line UI chrome left by the browser-capture DOM scrape that carries no
+    # tracking param to key on: "Report this post|comment", a bare "N Reaction(s)"
+    # count, the "<Name> is an Influencer" badge, and a lone relative timestamp
+    # (2d, 23h). Each is matched only as an ENTIRE line (anchored) so post prose
+    # is never touched. The share menu (Copy / LinkedIn / Facebook / X) is NOT
+    # here — those bare single-word bullets also occur in legitimate "find me
+    # here:" content lists, so they're handled by _LINKEDIN_SHARE_MENU (a
+    # Copy-anchored cluster) instead. ("To view or add a comment" is likewise not
+    # here: _LINKEDIN_TRAILING_MARKER cuts everything after it, which is stronger.)
+    r'^[ \t]*(?:'
+    r'-\s*Report this (?:post|comment)'
+    r'|\d+\s*Reactions?'
+    r'|.+?\bis an [Ii]nfluencer'
+    r'|\d+[hdmw]'
+    r')[ \t]*$',
+    re.MULTILINE,
+)
+
+
+_LINKEDIN_SHARE_MENU = re.compile(
+    # The post/comment share menu — a `- Copy` (copy-link) bullet followed by
+    # share-target bullets. Anchored on `- Copy` so a legitimate content list
+    # ("Find me here:\n- LinkedIn\n- X\n- Substack") that lacks the Copy anchor
+    # is left intact; the real share menu always leads with Copy.
+    r'^[ \t]*-\s*Copy[ \t]*\n'
+    r'(?:[ \t]*-\s*(?:LinkedIn|Facebook|X|WhatsApp|Telegram|Send|Email)[ \t]*\n?)+',
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
 # Twitter/X image URLs come in size variants via the `name=` query param:
 # small (~680px), medium (~1200px), large (full ~2000px), 4096x4096 (orig).
 # Web Clipper grabs `name=large` by default — way too big for Obsidian's
@@ -803,6 +867,18 @@ def _strip_linkedin_chrome(body: str) -> str:
     # them with the chrome they're concatenated to.
     post_images = _LINKEDIN_POST_IMAGE.findall(body)
 
+    # Inline byline profile-card chrome (image-link + name-link carrying LinkedIn
+    # feed tracking params). Self-identifying via the trk=...feed-actor /
+    # public_post signature, so strip it wherever it appears — it survives the
+    # leading branches on browser-capture clips that lack a `## Feed post`
+    # marker. Collapse the whitespace-only lines the removed byline leaves.
+    chrome_stripped = False
+    _decromed = _LINKEDIN_SHARE_MENU.sub("", _LINKEDIN_RESIDUAL_CHROME.sub(
+        "", _LINKEDIN_TRK_BARE_URL.sub("", _LINKEDIN_ACTOR_LINK.sub("", body))))
+    if _decromed != body:
+        chrome_stripped = True
+        body = re.sub(r'\n[ \t]*\n(?:[ \t]*\n)+', '\n\n', _decromed).lstrip("\n ")
+
     leading = _LINKEDIN_LEADING_MARKER.search(body)
     if leading:
         body = body[leading.end():].lstrip("\n ")
@@ -894,8 +970,8 @@ def _strip_linkedin_chrome(body: str) -> str:
         if to_attach:
             body = body.rstrip() + "\n\n" + "\n\n".join(to_attach)
 
-    if not (leading or trailing) and not post_images:
-        return body  # neither marker found, no images extracted — pass unchanged
+    if not (leading or trailing or chrome_stripped) and not post_images:
+        return body  # nothing matched, no images extracted — pass unchanged
     return body.strip() + "\n"
 
 

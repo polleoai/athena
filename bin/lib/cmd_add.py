@@ -32,8 +32,24 @@ from typing import List
 from _heredoc_runner import run_body
 
 
+def _frozen() -> bool:
+    """True under a Nuitka/PyInstaller binary (no on-disk .py, no python exe)."""
+    return getattr(sys, "frozen", False) or "__compiled__" in globals()
+
+
 def _capture(root: str, *args: str) -> int:
-    """Run bin/kb-capture with the given args (mirrors `"${KB_ROOT}/bin/kb-capture" ...`)."""
+    """Run capture with the given args (mirrors `"${KB_ROOT}/bin/kb-capture" ...`).
+
+    Frozen binary: call capture.run_capture() IN-PROCESS — sys.executable is the
+    binary itself and bin/kb-capture is not on disk, so the subprocess form
+    cannot work. Source/dev mode keeps the subprocess call byte-for-byte, which
+    preserves the Bash parity oracle and the test_kb_parity stub (a fake
+    <vault>/bin/kb-capture the test injects on the subprocess boundary).
+    """
+    if _frozen():
+        import capture  # noqa: E402 — lazy so source mode never imports it
+        sys.stdout.flush()
+        return capture.run_capture(*args, vault_root=root)
     capture = os.path.join(root, "bin", "kb-capture")
     # Flush our own buffered stdout first so the child's inherited-fd writes
     # interleave in the same order Bash produced (Bash had no buffer between

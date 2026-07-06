@@ -2,7 +2,7 @@ import os, sys, importlib.util, importlib.machinery, unittest
 LIB = os.path.join(os.path.dirname(__file__), "..", "bin", "lib")
 sys.path.insert(0, LIB)
 
-_kc_path = os.path.join(os.path.dirname(__file__), "..", "bin", "kb-capture")
+_kc_path = os.path.join(os.path.dirname(__file__), "..", "bin", "lib", "capture.py")
 _spec = importlib.util.spec_from_loader(
     "kbcapture", importlib.machinery.SourceFileLoader("kbcapture", _kc_path))
 kc = importlib.util.module_from_spec(_spec)

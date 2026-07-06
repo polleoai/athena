@@ -48,17 +48,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LEGACY = ROOT / "bin" / "kb-capture-legacy"
+# Subprocess parity runs the CLI shim (bin/kb-capture), which delegates into
+# capture.py — its stdout/exit are identical to the pre-refactor monolith.
 PY_CAPTURE = ROOT / "bin" / "kb-capture"
+# The capture LOGIC (detect_type, url_to_slug, …) now lives in the importable
+# module, so function-level parity loads capture.py directly.
+CAPTURE_MOD = ROOT / "bin" / "lib" / "capture.py"
 
 
-# ── Load bin/kb-capture as an importable module (without running main) ───────
+# ── Load capture.py as an importable module (without running main) ───────────
 def _load_py_capture() -> types.ModuleType:
-    src = PY_CAPTURE.read_text()
+    src = CAPTURE_MOD.read_text()
     mod = types.ModuleType("kb_capture_under_test")
-    mod.__file__ = str(PY_CAPTURE)
+    mod.__file__ = str(CAPTURE_MOD)
     if str(ROOT / "bin" / "lib") not in sys.path:
         sys.path.insert(0, str(ROOT / "bin" / "lib"))
-    exec(compile(src, str(PY_CAPTURE), "exec"), mod.__dict__)
+    exec(compile(src, str(CAPTURE_MOD), "exec"), mod.__dict__)
     return mod
 
 
