@@ -24,7 +24,7 @@ sys.path.insert(0, str(_VAULT / "bin" / "lib"))
 
 
 def _load_kb_capture():
-    path = _VAULT / "bin" / "kb-capture"
+    path = _VAULT / "bin" / "lib" / "capture.py"
     loader = SourceFileLoader("kb_capture_mod", str(path))
     spec = importlib.util.spec_from_loader("kb_capture_mod", loader)
     mod = importlib.util.module_from_spec(spec)

@@ -33,10 +33,11 @@ sys.path.insert(0, str(_VAULT / "bin" / "lib"))
 
 
 def _load_ingest_file():
-    """Load bin/ingest-file (extensionless script) as an importable module."""
-    path = _VAULT / "bin" / "ingest-file"
-    loader = SourceFileLoader("ingest_file_mod", str(path))
-    spec = importlib.util.spec_from_loader("ingest_file_mod", loader)
+    """Load the URL-file ingest module (logic relocated from bin/ingest-file
+    into the importable bin/lib/ingest_url.py; the script is now a thin shim)."""
+    path = _VAULT / "bin" / "lib" / "ingest_url.py"
+    loader = SourceFileLoader("ingest_url_mod", str(path))
+    spec = importlib.util.spec_from_loader("ingest_url_mod", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod

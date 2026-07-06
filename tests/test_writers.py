@@ -1247,6 +1247,120 @@ class TestLinkedInChromeStrip(_VaultCase):
         # Body content preserved
         self.assertIn("AISecurity", stripped)
 
+    # Inline byline "profile card" chrome on browser-capture clips that lack a
+    # `## Feed post` marker (so the leading branches never fire). The image-link
+    # + name-link both carry trk=...feed-actor / public_post tracking params.
+    # Witnessed 2026-07-05: itsecuritypartners ugcpost 7463304018908532737.
+    INLINE_ACTOR = (
+        '[<img src="https://static.licdn.com/aero-v1/sc/h/foo" '
+        'alt="View profile for Anthony Fuller" width="600">]'
+        '(https://www.linkedin.com/in/itsecuritypartners?trk=public_post_feed-actor-image)\n'
+        '      \n        \n'
+        '[Anthony Fuller](https://www.linkedin.com/in/itsecuritypartners?trk=public_post_feed-actor-name)\n\n'
+    )
+
+    def test_strips_inline_actor_card(self):
+        from process_clip import _strip_linkedin_chrome
+        full = "# #agenticai\n\n" + self.INLINE_ACTOR + self.POST_BODY
+        stripped = _strip_linkedin_chrome(full)
+        self.assertNotIn("View profile for", stripped)
+        self.assertNotIn("feed-actor", stripped)
+        self.assertNotIn("[Anthony Fuller]", stripped)
+        # Real post body + a legitimate LinkedIn search link survive.
+        self.assertIn("ClaudeBleed", stripped)
+        self.assertIn("AISecurity", stripped)
+
+    def test_preserves_non_chrome_linkedin_link(self):
+        """A LinkedIn link WITHOUT the feed-actor/public_post trk signature
+        (e.g. the post body's own #hashtag search link) must NOT be stripped."""
+        from process_clip import _strip_linkedin_chrome
+        body = (self.POST_BODY  # ends with a real #AISecurity search link
+                + "\n\n[More](https://www.linkedin.com/feed/?trk=homepage)")
+        stripped = _strip_linkedin_chrome(body)
+        self.assertIn("AISecurity", stripped)
+        self.assertIn("search/results", stripped)  # the legit search link stays
+
+    def test_strips_bare_comment_actor_urls_keeps_comment_text(self):
+        """Comment-author profile links render as BARE tracking URLs
+        (`?trk=public_post_comment_actor-image`), not markdown links. Strip the
+        naked-URL lines but keep the comment text itself."""
+        from process_clip import _strip_linkedin_chrome
+        body = (
+            self.POST_BODY + "\n\n## Comments\n\n"
+            "          https://bh.linkedin.com/in/noumankhan-nak?trk=public_post_comment_actor-image\n\n"
+            "Interesting architecture — how do you handle trust validation at scale?\n\n"
+            "          https://www.linkedin.com/in/epowell?trk=public_post_comment_actor-image\n\n"
+            "Very useful, thanks for sharing.\n"
+        )
+        stripped = _strip_linkedin_chrome(body)
+        self.assertNotIn("comment_actor", stripped)
+        self.assertNotIn("noumankhan-nak", stripped)
+        self.assertIn("trust validation at scale", stripped)  # comment text kept
+        self.assertIn("Very useful, thanks for sharing", stripped)
+
+    def test_strips_residual_dom_chrome_keeps_content(self):
+        """Browser-capture DOM chrome with no tracking param: share menu,
+        Report links, N Reactions, the influencer badge, bare timestamps, and
+        the comment CTA. All whole-line UI; post prose must survive — including
+        a content line that merely CONTAINS 'influencer'."""
+        from process_clip import _strip_linkedin_chrome
+        body = (
+            "Rock Lambros is an Influencer\n\n2d\n\n- Report this post\n\n"
+            + self.POST_BODY
+            + "\n\n- Copy\n- LinkedIn\n- Facebook\n- X\n\n                2 Reactions\n\n"
+            "This platform is an influencer marketing tool we should keep.\n\n"
+            "To view or add a comment, sign in\n"
+        )
+        stripped = _strip_linkedin_chrome(body)
+        self.assertNotIn("is an Influencer", stripped)
+        self.assertNotIn("Report this post", stripped)
+        self.assertNotIn("- Copy", stripped)
+        self.assertNotIn("2 Reactions", stripped)
+        self.assertNotIn("To view or add a comment", stripped)
+        self.assertIn("ClaudeBleed", stripped)  # post body kept
+        # A content line that merely contains "influencer" is NOT chrome.
+        self.assertIn("influencer marketing tool we should keep", stripped)
+
+    def test_preserves_content_links_carrying_public_post_trk(self):
+        """CRITICAL false-positive guard: LinkedIn stamps `trk=public_post*` on
+        CONTENT links too — inline @mentions (`feed-mention`), the post/comment
+        text links (`public_post-text` / `comment-text`, which wrap referenced
+        arXiv/GitHub URLs Athena queues). Only the `actor` cards are chrome; the
+        content links must survive. (A too-broad `public_post` match deleted
+        real comment references — caught in pre-release review, 2026-07-05.)"""
+        from process_clip import _strip_linkedin_chrome
+        body = (
+            '[<img alt="View profile for Jane">](https://www.linkedin.com/in/jane'
+            '?trk=public_post_feed-actor-image)\n'
+            '[Jane](https://www.linkedin.com/in/jane?trk=public_post_feed-actor-name)\n\n'
+            + self.POST_BODY + "\n\n"
+            "Thanks [John Smith](https://www.linkedin.com/in/js?trk=public_post_feed-mention)! "
+            "See [arxiv.org/abs/2605.00055](https://arxiv.org/abs/2605.00055?trk=public_post_comment-text) "
+            "and [the repo](https://github.com/acme/x?trk=public_post-text).\n"
+        )
+        stripped = _strip_linkedin_chrome(body)
+        # Actor cards (byline) stripped.
+        self.assertNotIn("feed-actor", stripped)
+        self.assertNotIn('alt="View profile for Jane"', stripped)
+        # Content links + their referenced resources preserved.
+        self.assertIn("John Smith", stripped)
+        self.assertIn("arxiv.org/abs/2605.00055", stripped)
+        self.assertIn("github.com/acme/x", stripped)
+
+    def test_preserves_bio_social_list_without_copy_anchor(self):
+        """The share menu is stripped only as a `- Copy`-anchored cluster; a
+        legitimate "find me here" bullet list (no Copy) must survive."""
+        from process_clip import _strip_linkedin_chrome
+        # Real share menu (Copy-anchored) → stripped.
+        with_menu = self.POST_BODY + "\n\n- Copy\n- LinkedIn\n- Facebook\n- X\n"
+        s1 = _strip_linkedin_chrome(with_menu)
+        self.assertNotIn("- Facebook", s1)
+        # Bio list (no Copy) → preserved.
+        bio = self.POST_BODY + "\n\nFind me here:\n- LinkedIn\n- X\n- Substack\n"
+        s2 = _strip_linkedin_chrome(bio)
+        self.assertIn("- LinkedIn", s2)
+        self.assertIn("- Substack", s2)
+
     def test_strips_n_reactions_footer(self):
         from process_clip import _strip_linkedin_chrome
         full = self.LEADING_CHROME + self.POST_MARKER + self.PROFILE_NAV + self.POST_BODY + "\n\n42 reactions\n"

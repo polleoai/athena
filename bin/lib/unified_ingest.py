@@ -44,12 +44,23 @@ Pure dependency direction:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _frozen() -> bool:
+    """True under a Nuitka/PyInstaller binary (no on-disk .py, no python exe).
+
+    Selects the in-process capture path — the subprocess form re-execs a .py
+    under sys.executable, which is the binary itself in a frozen build.
+    """
+    return getattr(sys, "frozen", False) or "__compiled__" in globals()
 
 # Lazy module imports happen inside handlers; this module runs in many
 # contexts (MCP stdio server, CLI, tests, watcher), and a top-level import
@@ -600,43 +611,70 @@ def _delegate_to_kb_capture(
     when those handlers move into this module; for now it's harmless
     because both dispatches reach the same conclusion.
     """
-    kb_capture = input.vault_root / "bin" / "kb-capture"
-    if not kb_capture.is_file():
-        raise UnifiedIngestError(
-            f"bin/kb-capture not found at {kb_capture} — cannot delegate "
-            f"{source_type} extraction"
-        )
+    # Frozen binary: drive capture IN-PROCESS. sys.executable is the binary and
+    # bin/kb-capture is not on disk, so the subprocess form cannot work. We
+    # capture stdout (the written-raw-path line is parsed below) and translate a
+    # handler die()/sys.exit() into an exit code via capture.run_capture. Source
+    # /dev mode keeps the subprocess call byte-for-byte (parity oracle + the
+    # test_kb_parity stub inject on that boundary).
+    if _frozen():
+        import capture  # noqa: E402 — lazy so source mode never imports it
 
-    env = dict(os.environ)
-    env["KB_ROOT"] = str(input.vault_root)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                returncode = capture.run_capture(
+                    canonical_url, vault_root=str(input.vault_root))
+        except Exception as exc:  # noqa: BLE001 — surface as ingest error
+            raise UnifiedIngestError(
+                f"in-process capture crashed for {canonical_url} "
+                f"(source_type={source_type}): {exc}"
+            ) from exc
+        stdout = buf.getvalue()
+        if returncode != 0:
+            raise UnifiedIngestError(
+                f"capture failed for {canonical_url} (exit "
+                f"{returncode}): {stdout.strip()}"
+            )
+    else:
+        kb_capture = input.vault_root / "bin" / "kb-capture"
+        if not kb_capture.is_file():
+            raise UnifiedIngestError(
+                f"bin/kb-capture not found at {kb_capture} — cannot delegate "
+                f"{source_type} extraction"
+            )
 
-    try:
-        proc = subprocess.run(
-            # kb-capture is now cross-platform Python — invoke via the
-            # interpreter so it runs on native Windows (no shebang there).
-            [sys.executable, str(kb_capture), canonical_url],
-            cwd=str(input.vault_root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,  # arxiv PDF downloads can be slow
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise UnifiedIngestError(
-            f"kb-capture timed out for {canonical_url} (source_type="
-            f"{source_type}); 600s limit exceeded"
-        ) from exc
+        env = dict(os.environ)
+        env["KB_ROOT"] = str(input.vault_root)
 
-    if proc.returncode != 0:
-        raise UnifiedIngestError(
-            f"kb-capture failed for {canonical_url} (exit "
-            f"{proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
-        )
+        try:
+            proc = subprocess.run(
+                # kb-capture is now cross-platform Python — invoke via the
+                # interpreter so it runs on native Windows (no shebang there).
+                [sys.executable, str(kb_capture), canonical_url],
+                cwd=str(input.vault_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=600,  # arxiv PDF downloads can be slow
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise UnifiedIngestError(
+                f"kb-capture timed out for {canonical_url} (source_type="
+                f"{source_type}); 600s limit exceeded"
+            ) from exc
 
-    # kb-capture prints the written raw path on its last stdout line.
+        if proc.returncode != 0:
+            raise UnifiedIngestError(
+                f"kb-capture failed for {canonical_url} (exit "
+                f"{proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+            )
+        stdout = proc.stdout
+
+    # capture prints the written raw path on its last stdout line.
     # We need that path for IngestResult.raw_path.
     raw_path = _extract_raw_path_from_kb_capture_output(
-        proc.stdout, input.vault_root, source_type, canonical_url,
+        stdout, input.vault_root, source_type, canonical_url,
     )
 
     try:

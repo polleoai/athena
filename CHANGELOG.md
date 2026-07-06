@@ -4,6 +4,20 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-05
+
+Headline: **capture quality — papers keep their full text, and LinkedIn/X posts come in clean.** Saved papers now carry the whole PDF, not just the abstract; LinkedIn and X captures are stripped of feed scaffolding so what you keep is the post and its comments; and the health check now audits your social and paper captures for the ones worth re-capturing. No change to the bundled assistant (Gryphon 2.7.0).
+
+### Added
+
+- **The health check now audits your captures.** `kb lint` flags LinkedIn/X posts that came in thin, chrome-laden, or truncated, and papers saved abstract-only — so you can spot the low-quality ones and re-capture them, instead of finding out later when a summary is missing half the content.
+
+### Fixed
+
+- **Saved papers now include the full text, not just the abstract.** Clipping or adding an arXiv paper downloaded the PDF but saved only the abstract into the local copy, so the summary and search saw a fraction of the paper. Athena now reads the whole PDF and saves the complete text alongside the abstract. The health check lists older papers still saved abstract-only so you can re-capture them.
+- **Clipping a PDF paper no longer shows a spurious "failed."** A PDF you clipped from the browser can't be read as a web page, so Athena re-fetches it in the background — but when two of its watchers raced to capture the same paper, the second one reported a failure even though the paper had already been saved correctly. Re-capturing an already-saved paper is now treated as success, so the false "failed" is gone.
+- **Cleaner saved LinkedIn posts.** A LinkedIn post clipped from the browser used to drag in a pile of feed scaffolding — the byline "profile card", a profile-image link before every commenter, the share menu (Copy / LinkedIn / Facebook / X), "Report this post/comment" links, bare reaction counts, the "X is an Influencer" badge, and stray timestamps — sometimes more chrome than post. All of it is now stripped at capture, so the saved copy is the post and the comment text (including the arXiv/GitHub links people drop in the comments, which are preserved and queued for capture).
+
 ## [1.6.5] — 2026-07-03
 
 Headline: **the bundled assistant gets safer, and slide-deck talks capture cleanly.** This release moves the bundled Gryphon assistant to 2.7.0, which now asks before running package-install commands and flags reverse-shell command shapes — closing two common ways a booby-trapped project tries to get code onto your machine. reveal.js slide-deck extraction moves to the upstream capture engine (more reliable, and nested vertical slides are now captured), and re-captures no longer spawn duplicate pages.

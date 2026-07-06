@@ -1252,6 +1252,40 @@ if browser_captured_tweets:
     check("X/Twitter posts captured via DOM walker (re-capture for full content)",
           browser_captured_tweets)
 
+# Papers whose raw has a PDF on disk but only the scraped abstract in the body.
+# The arxiv `paper` branch used to write just the HTML abstract even after
+# downloading the PDF, so the wiki summary + search index saw a fraction of the
+# paper. handle_paper now runs the PDF through arcus and appends a `## Full Text`
+# section; this surfaces the back-catalog captured before that fix so it can be
+# re-captured. Detection is body-driven (parse the `PDF:` line, resolve it, and
+# look for `## Full Text`) because the .pdf and .md slugs differ (dots vs dashes).
+# Surface-only — re-capture is a network op, never auto-fetched. Witnessed:
+# arxiv 2606.21071 (Local LLM Agents as Vulnerable Runtimes), 2026-07-04.
+abstract_only_papers = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'papers', 'artifacts', '*.md')) +
+                 glob.glob(os.path.join(KB, 'raw', 'papers', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            content = fh.read()
+    except (IOError, UnicodeDecodeError):
+        continue
+    m = re.search(r'^- \*\*PDF:\*\*\s*\./(\S+\.pdf)\s*$', content, re.MULTILINE)
+    if not m:
+        continue  # no local PDF → full-text re-capture is not applicable
+    pdf_path = os.path.join(os.path.dirname(rf), m.group(1))
+    if not os.path.isfile(pdf_path):
+        continue  # PDF missing → a different (asset) problem, not this one
+    if re.search(r'^##\s+Full Text\s*$', content, re.MULTILINE):
+        continue  # already carries the extracted full text
+    abstract_only_papers.append(
+        f"{os.path.basename(rf)}: PDF on disk but body is abstract-only — "
+        f"re-capture via `kb add <url>` for full text")
+# Gated on a non-empty result so total_checks stays byte-identical to the frozen
+# Bash oracle (which has no such check) on vaults with no abstract-only papers.
+if abstract_only_papers:
+    check("Papers with PDF but abstract-only body (re-capture for full text)",
+          abstract_only_papers)
+
 # X Articles stored preview-only (full body needs the cookie-reuse deep-capture).
 # Identified by the article-preview marker line emitted by fetch_tweet. Surface
 # (never auto-fetch) so they can be re-captured once an X session is imported.
@@ -1268,6 +1302,82 @@ for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.m
             f"(re-capture with an X session for the full body)")
 if x_article_preview:
     check("X Articles stored preview-only (re-capture for full body)", x_article_preview)
+
+# Low-quality social captures — a quality-signature audit of X/LinkedIn raws
+# (not path alone: a weak-path capture can still be a good long thread, so
+# flagging every web-clipper drop would false-flag those). Three signatures the
+# other social checks don't cover:
+#   * X post with no text — link/image only. The Web-Clipper DOM scrape dropped
+#     the tweet body; the syndication CDN (fetch_tweet) has the real text.
+#   * LinkedIn body carrying UI chrome — a `trk=` tracking param, a "View profile
+#     for" profile card, or feed-actor markup that survived even deep-capture.
+#   * An unexpanded "…more" / "see more" truncation (the post is cut off).
+# Discover-and-surface only (re-capture / re-clean is a network or write op,
+# never auto-fetched). Witnessed 2026-07-05: aisechub/2055643673799369159 (thin),
+# itsecuritypartners ugcpost 7463304018908532737 (LinkedIn chrome).
+def _social_prose_len(body):
+    b = re.sub(r'^#.*$', '', body, flags=re.M)                 # headings
+    b = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', b)                 # md images
+    b = re.sub(r'<img[^>]*>', '', b)                           # html images
+    b = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', b)             # md link → text
+    b = re.sub(r'https?://\S+', '', b)                         # bare URLs
+    b = re.split(r'\n##\s*(?:Comments|Links Found|Connections|Keywords)', b)[0]
+    return len(re.sub(r'\s+', ' ', b).strip())
+
+
+# Matches the actor-card chrome the stripper targets (feed-actor byline /
+# comment_actor), NOT the broad `trk=` namespace — LinkedIn stamps `trk=` on
+# content links (post/comment text, mentions) too, so a bare `trk=` would
+# false-alarm on a legitimately-captured post. Mirrors process_clip's
+# _LINKEDIN_ACTOR_LINK signature.
+_LI_CHROME_RE = re.compile(r'View profile for|\btrk=[^)\s]*[_-]actor', re.IGNORECASE)
+_SOCIAL_TRUNC_RE = re.compile(r'…\s*more|\bsee more\b|\bShow this thread\b', re.IGNORECASE)
+# A substantive external link = an http(s) URL to a host OTHER than X's own
+# image/self-link hosts. A link-share tweet whose payload IS such a link (a
+# GitHub repo, an arXiv paper, an article) is adequately captured even with
+# little prose, so it must NOT be flagged as thin — only genuinely empty
+# captures (image-only, no external link) are the DOM-scrape failures.
+_X_EXTERNAL_LINK_RE = re.compile(
+    r'https?://(?!(?:www\.)?(?:pbs\.twimg\.com|video\.twimg\.com|x\.com|twitter\.com)[/:])\S+',
+    re.IGNORECASE,
+)
+
+low_quality_social = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            txt = fh.read()
+    except (IOError, UnicodeDecodeError):
+        continue
+    fmm = re.match(r'^---\s*\n(.*?)\n---\n?(.*)$', txt, re.DOTALL)
+    fm_s, body_s = (fmm.group(1), fmm.group(2)) if fmm else ("", txt)
+    src_m = re.search(r'^source:\s*"?([^"\n]+)', fm_s, re.MULTILINE)
+    src = src_m.group(1) if src_m else ""
+    is_x = bool(re.search(r'https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/', src))
+    is_li = 'linkedin.com/' in src
+    if not (is_x or is_li):
+        continue
+    bn = os.path.basename(rf)
+    if (is_x and _social_prose_len(body_s) < 80
+            and re.search(r'!\[|<img|https?://', body_s)
+            and not _X_EXTERNAL_LINK_RE.search(body_s)):
+        # Thin AND no substantive external link — the DOM scrape dropped the
+        # text and there's no shared link standing in for it. A link-share
+        # tweet (github/arxiv/article) is adequately captured; not flagged.
+        low_quality_social.append(
+            f"{bn}: X post has no text (image only) — re-capture via "
+            f"syndication (`kb add <url>`)")
+    elif is_li and _LI_CHROME_RE.search(body_s):
+        low_quality_social.append(
+            f"{bn}: LinkedIn chrome in body (trk= / profile-card / feed-actor) "
+            f"— re-capture via deep-capture / re-clean")
+    elif _SOCIAL_TRUNC_RE.search(body_s):
+        low_quality_social.append(
+            f"{bn}: truncated (…more not expanded) — re-capture for the full post")
+# Gated on a non-empty result so total_checks stays byte-identical to the frozen
+# Bash oracle (which has no such check) on vaults with no flagged social raws.
+if low_quality_social:
+    check("Low-quality social captures (re-capture for full content)", low_quality_social)
 
 # Thread-truncated tweet raws. A Web-Clipper "self-thread index" (a tweet that
 # links to many of the author's OWN /status/ posts) re-captured via the
