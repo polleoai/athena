@@ -4,6 +4,18 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-07-06
+
+Headline: **the bundled assistant gains new, more capable models.** This release moves the bundled Gryphon assistant to 2.8.0, which adds Anthropic's Claude Fable 5 and Sonnet 5 and Google's Gemini 3.5 Flash and 3.1 Flash-Lite to the model dropdown, and makes Sonnet 5 the new default for the Claude path. Athena's own capture and synthesis behaviour is unchanged from 1.7.0.
+
+### Added
+
+- **New Claude and Gemini models in the bundled assistant.** Gryphon 2.8.0 adds Claude Fable 5 (Anthropic's most capable model, for demanding reasoning and long-horizon work) and Claude Sonnet 5 (the newest balanced model, at the same price as Sonnet 4.6), plus Gemini 3.5 Flash (tuned for agentic and coding work) and Gemini 3.1 Flash-Lite (the cheapest Gemini 3 tier). All are selectable from the model dropdown; the Claude and Gemini paths use your own API key as before.
+
+### Changed
+
+- **Claude Sonnet 5 is the new default model.** Fresh installs start on Sonnet 5. If you have already picked a model, your choice is unchanged and every previous model (Sonnet 4.6, the Opus tiers, and the rest) remains selectable.
+
 ## [1.7.0] — 2026-07-05
 
 Headline: **capture quality — papers keep their full text, and LinkedIn/X posts come in clean.** Saved papers now carry the whole PDF, not just the abstract; LinkedIn and X captures are stripped of feed scaffolding so what you keep is the post and its comments; and the health check now audits your social and paper captures for the ones worth re-capturing. No change to the bundled assistant (Gryphon 2.7.0).
