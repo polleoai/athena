@@ -4,6 +4,27 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.5] — 2026-07-31
+
+Headline: **the bundled assistant gains a new provider, retires a discontinued one, hardens its guardrails, and adds four models.** This release moves the bundled Gryphon assistant from 2.8.0 (shipped in Athena 1.7.1) to 2.9.3. Athena's own capture and synthesis behaviour is unchanged.
+
+### Added
+
+- **New assistant provider: Antigravity CLI.** You can now run the bundled assistant through Google's Antigravity CLI (`agy`) — pick **Antigravity CLI (advanced)** in Settings → Models. Gryphon auto-detects the binary (with a detection status and a **Re-detect** button, plus a field for a non-standard install path), and the CLI handles its own sign-in — run `agy` once in a terminal, no API key to enter. Antigravity uses the Gemini model list and is also available as a fallback provider.
+- **Four new models.** Claude Opus 5, GPT-5.6 Terra, GPT-5.6 Luna, and Gemini 3.6 Flash are now selectable from the model dropdown, each with current pricing.
+
+### Changed
+
+- **The discontinued Gemini CLI provider is retired.** Google ended Gemini CLI access for Gemini Code Assist individual accounts; that failure used to be invisible — the assistant would appear to work and simply return an empty reply. The provider is now hard-deprecated with a clear pointer to Antigravity CLI as its replacement. The Gemini API provider (your own API key) is unaffected.
+
+### Security
+
+- **Antigravity runs under Gryphon's approval layer — and now refuses to run if it can't.** Antigravity has no per-request approval prompt that works outside an interactive terminal, so Gryphon takes over that decision with its own approval layer. On Windows in Gryphon 2.9.1–2.9.2 that layer could be installed but never actually start, and Antigravity treats a layer that fails to start as permission granted — so protected commands and paths were not enforced, on Windows only. That is fixed, and Gryphon now stops with an explanation naming the cause rather than continuing unprotected. More of Antigravity's file and command actions are recognised, so protected paths hold whichever route the model takes — including a blocked file write retried as a shell command.
+
+### Fixed
+
+- **Antigravity CLI is detected reliably on slower machines.** Its unusually large program file could exceed the version-check window and be reported as "not detected" even when installed; the window now scales with the program size. CLI detection checks also no longer leave background processes behind on Windows.
+
 ## [1.7.1] — 2026-07-06
 
 Headline: **the bundled assistant gains new, more capable models.** This release moves the bundled Gryphon assistant to 2.8.0, which adds Anthropic's Claude Fable 5 and Sonnet 5 and Google's Gemini 3.5 Flash and 3.1 Flash-Lite to the model dropdown, and makes Sonnet 5 the new default for the Claude path. Athena's own capture and synthesis behaviour is unchanged from 1.7.0.
