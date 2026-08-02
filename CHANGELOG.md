@@ -4,6 +4,18 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.6] — 2026-08-02
+
+Headline: **the bundled assistant moves to Gryphon 2.9.6, and the plugin builds cleanly from a fresh checkout.** This release picks up Gryphon's dependency-security and housekeeping updates (2.9.3 → 2.9.6) and fixes source builds in a clean environment. Athena's own capture and synthesis behaviour is unchanged.
+
+### Security
+
+- **Bundled dependencies updated to clear security advisories.** Moving the bundled Gryphon assistant to 2.9.6 pulls in its dependency fixes: the Anthropic SDK was moved off a version carrying a moderate advisory (CVE-2026-41686), and seven further advisories in the dependency tree — six of them high severity, including a WebSocket library used by the Google and OpenAI clients that could disclose uninitialised memory — were resolved. Athena's own `@anthropic-ai/sdk` build dependency was updated to match. No change to how the plugin behaves.
+
+### Fixed
+
+- **The plugin now builds from a clean checkout.** `npm install && npm run build` on a fresh clone previously failed because the build bundles the vendored Gryphon assistant's source, which lives in a git submodule that a plain clone leaves empty. The build now initializes that submodule automatically when it is missing, so a fresh checkout builds without extra steps. No effect on the released plugin's behaviour.
+
 ## [1.7.5] — 2026-07-31
 
 Headline: **the bundled assistant gains a new provider, retires a discontinued one, hardens its guardrails, and adds four models.** This release moves the bundled Gryphon assistant from 2.8.0 (shipped in Athena 1.7.1) to 2.9.3. Athena's own capture and synthesis behaviour is unchanged.
