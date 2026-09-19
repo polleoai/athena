@@ -4,6 +4,14 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.9] — 2026-09-19
+
+Headline: **Athena now builds from a source archive, not just a git clone.** No change to how Athena behaves — this release exists so the plugin can be built by anyone who downloaded the source rather than cloning it, which is how Obsidian's plugin review checks it.
+
+### Fixed
+
+- **`npm run build` works without git metadata.** Athena bundles its assistant from a pinned Gryphon commit, recorded as a git submodule. A source archive (tarball or zip) carries no git data, so the build could not work out which Gryphon to use and stopped with "not a git repository". The pinned commit is now also recorded in a plain file, and a build with no git fetches exactly that commit instead. A normal git clone is unaffected and still uses the submodule.
+
 ## [1.7.8] — 2026-09-18
 
 Headline: **pages built from components capture in full instead of landing as a teaser — and, for source-tree installs, links from a notification save the post you clicked.**
