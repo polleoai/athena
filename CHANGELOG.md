@@ -4,6 +4,21 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.8] — 2026-09-18
+
+Headline: **links you get from a notification or an email now save the post you clicked, not the page you landed on.** Some sites name a post only in the tail of the URL — the part after the `?`. Athena treated that tail as tracking clutter and removed it, so what got saved was whichever page remained: a sign-in wall, or a snapshot of a feed. This release keeps the part that names the post, warns you when a link cannot be traced back to one, and stops a bad save from overwriting a good one.
+
+### Fixed
+
+- **LinkedIn notification and email links now save the post.** A link of the form `linkedin.com/feed/?highlightedUpdateUrn=…` carries the post's identity only in the query, which Athena stripped — leaving the bare feed address. Logged out that saved a "New to LinkedIn?" sign-in page; logged in it saved whatever the feed happened to be showing, under a title matching none of it. Worse, every such link reduced to the same address, so the second one you saved was reported as a duplicate of the first, unrelated post. These links now resolve to the post itself, and the share and in-app variants of the same link resolve with it.
+- **A save can no longer overwrite a different source's copy.** When two sources produced the same filename, Athena announced it would use a new name and then wrote the original one anyway, replacing content that was already there. The check now lives where the file is written, so it applies to every save — from the health check, the Web Clipper, or `kb add` — and the second source gets its own file.
+- **A failed fetch that returns a sign-in page no longer replaces a good copy.** The guard that recognises these pages had not seen LinkedIn's "New to LinkedIn?" wording.
+
+### Added
+
+- **Athena now tells you when a link cannot be traced to a single item.** Saving an address that names a view rather than a thing — a feed, a home page, a search — stops with an explanation and asks for the item's own link, instead of quietly saving the view. Pass `ATHENA_ALLOW_IDENTITYLESS=1` to save the view deliberately. The Web Clipper warns rather than refusing, since it already has the page in hand.
+- **The health check flags saved sources that point at a feed or site root.** These are the ones worth re-saving from the item's own link.
+
 ## [1.7.6] — 2026-08-02
 
 Headline: **the bundled assistant moves to Gryphon 2.9.6, and the plugin builds cleanly from a fresh checkout.** This release picks up Gryphon's dependency-security and housekeeping updates (2.9.3 → 2.9.6) and fixes source builds in a clean environment. Athena's own capture and synthesis behaviour is unchanged.

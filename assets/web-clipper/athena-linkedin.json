@@ -2,7 +2,7 @@
   "schemaVersion": "0.1.0",
   "name": "Athena — LinkedIn",
   "behavior": "create",
-  "noteContentFormat": "{{selectorHtml:.feed-shared-update-v2 .update-components-text|markdown}}\n\n{{selectorHtml:.feed-shared-update-v2 .update-components-article|markdown}}",
+  "noteContentFormat": "{{selectorHtml:.feed-shared-update-v2 .update-components-text|markdown ?? content}}\n\n{{selectorHtml:.feed-shared-update-v2 .update-components-article|markdown}}",
   "properties": [
     { "name": "title", "value": "{{title}}", "type": "text" },
     { "name": "source", "value": "{{url}}", "type": "text" },

@@ -244,6 +244,23 @@ def write_raw(
     artifacts.mkdir(parents=True, exist_ok=True)
     out = artifacts / f"{slug}.md"
 
+    # Distinct-source collision guard. A raw file belongs to the URL recorded
+    # in its own `source:` frontmatter; a write for a DIFFERENT source is not
+    # entitled to that filename and takes `<slug>-2`, `-3`, ... instead.
+    #
+    # capture.resolve_raw_path already computed this, printed the `-2` name to
+    # the user, and had its decision dropped when handle_webpage reassigned
+    # raw_file from the writer's return. Placing the rule here — inside the
+    # component that owns path derivation — leaves no return value for a
+    # caller to ignore, and covers kb-capture, the Web Clipper and the MCP
+    # server alike.
+    #
+    # Deliberately ordered BEFORE the content guards below: once a colliding
+    # write is redirected to a free path, there is no existing file for those
+    # guards to reason about. They stay for the same-URL case, where a
+    # re-capture legitimately overwrites in place.
+    out = _resolve_distinct_source(out, canonical_url)
+
     # Thin-overwrite guard. Refuse to clobber an existing larger raw with
     # significantly smaller new content. The "auth-wall capture overwrites
     # the good raw with 'Sign Up | LinkedIn'" failure mode (witnessed
@@ -269,6 +286,12 @@ def write_raw(
         "We couldn't find a post at this URL",
         "Sign Up | LinkedIn",
         "Join LinkedIn now",
+        # The wall that slipped past on 2026-09-17: LinkedIn serves this
+        # wording for /feed/ when logged out. Enumerated lists only know the
+        # variants someone has already been bitten by — the structural
+        # distinct-source guard above is what covers the unlisted ones.
+        "New to LinkedIn?",
+        "By continuing, you agree to LinkedIn",
         "Page not found",
         "404 Not Found",
     )
@@ -353,6 +376,46 @@ def write_raw(
             pass
         raise RawWriterError(f"filesystem write failed: {exc}") from exc
 
+    return out
+
+
+_FM_SOURCE_RE = re.compile(r'^source:\s*"?([^"\n]+)"?\s*$', re.MULTILINE)
+
+
+def _recorded_source(path: Path) -> str:
+    """The `source:` URL a raw file records for itself, or "" if unreadable.
+
+    Read from frontmatter rather than the first URL anywhere in the file: a
+    body full of lnkd.in links would otherwise decide the file's identity.
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:2048]
+    except OSError:
+        return ""
+    m = _FM_SOURCE_RE.search(head)
+    return m.group(1).strip() if m else ""
+
+
+def _resolve_distinct_source(out: Path, url: str) -> Path:
+    """`out` if it is free or already belongs to `url`; else the next free
+    `<stem>-N` sibling.
+
+    A raw whose recorded source cannot be read is treated as OWNED, not as
+    free real estate — an unreadable neighbour is the case where guessing
+    wrong destroys data.
+    """
+    if not out.exists():
+        return out
+    incoming = (url or "").strip()
+    existing = _recorded_source(out)
+    if not incoming or existing == incoming:
+        return out
+    for n in range(2, 100):
+        candidate = out.with_name(f"{out.stem}-{n}{out.suffix}")
+        if not candidate.exists():
+            return candidate
+        if _recorded_source(candidate) == incoming:
+            return candidate
     return out
 
 

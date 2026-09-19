@@ -203,7 +203,15 @@ def ingest(input: IngestInput) -> IngestResult:
     """
     # 1. Canonicalize the URL once, here. Handlers receive the canonical
     #    form — no handler should canonicalize separately.
-    from url_canonical import canonicalize
+    from url_canonical import canonicalize, identity_loss_refusal
+
+    # A URL whose identity did not survive canonicalization names a VIEW, not
+    # an item. This path fetches from the URL, so accepting it would capture
+    # whatever that view currently shows and file it under a key shared with
+    # every other URL pointing into it. Refuse, as kb add does.
+    _refusal = identity_loss_refusal(input.url)
+    if _refusal:
+        raise UnifiedIngestError(_refusal + " ingest")
 
     canonical_url = canonicalize(input.url).url
 

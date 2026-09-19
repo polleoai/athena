@@ -415,6 +415,11 @@ def canonicalize_url(u: str) -> str:
     return canonicalize(u).url
 
 
+def navigable_url(u: str) -> str:
+    from url_canonical import resolvable_url
+    return resolvable_url(u)
+
+
 # ── Config-driven raw directories ────────────────────────────────────────────
 def raw_dirs() -> dict[str, str]:
     """Mirror athena_raw_dir(): base dir + artifacts_subdir, from the merged
@@ -1677,7 +1682,15 @@ def main(argv: list[str]) -> int:
     # synthetic /posts/ugcpost-<id>, which LinkedIn rejects). canonicalize() is
     # for identity/dedup/slug; the network layer must hit the URL the user's
     # browser actually resolved.
-    raw_input_url = url
+    # `resolvable_url` fixes the one case where the URL the user pasted is NOT
+    # the best fetch target: LinkedIn's /feed/?highlightedUpdateUrn=<urn> form
+    # renders the whole feed, so navigate its single-post permalink instead.
+    raw_input_url = navigable_url(url)
+
+    from url_canonical import identity_loss_refusal as _id_refusal
+    _refusal = _id_refusal(url)
+    if _refusal:
+        die(_refusal + " kb add <url>")
     url = canonicalize_url(url)
 
     original_url = url
