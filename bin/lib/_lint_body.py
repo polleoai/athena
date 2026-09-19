@@ -1252,6 +1252,45 @@ if browser_captured_tweets:
     check("X/Twitter posts captured via DOM walker (re-capture for full content)",
           browser_captured_tweets)
 
+# Generic webpages captured via the DOM walker can land as a teaser/TOC shell
+# when the walker roots on a thin <article> wrapper. Adobe AEM "insights"
+# templates put a ~200-char cmp-article-side-panel-container (hero + Overview
+# list) FIRST, while the real body sits in sibling grid columns AFTER
+# </article>; querySelector('article') then captured only the outline. The
+# walker's thin-root guard (src/athena/plugin.js) re-roots on <body> so new
+# captures get the full body, but back-catalog raws captured before that fix
+# carry only the outline. A prose-only measure is fooled here — the walker
+# emits a concatenated heading-run ("The identity perimeter has movedHow AI
+# is expanding…") that scans as a paragraph — so gate on TOTAL body size
+# instead: a browser-captured webpage with a <2000-char body is a thin/shell
+# capture (the plugin already treats <600 bytes as thin and re-captures; a
+# nav-only arcus capture is ~1.2KB). Surface for re-capture. Gated to exclude
+# tweets/X (own check above, legitimately short). Surface-only — re-capture is
+# a network op, never auto-fetched. Witnessed: jpmorgan.com AI-cybersecurity
+# insight (1,478-char shell body vs a 23,025-char page), 2026-07-08.
+teaser_shell_webpages = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            content = fh.read()
+    except (IOError, UnicodeDecodeError):
+        continue
+    head = content[:2000]
+    if not re.search(r'^clipped_via:\s*"?browser-capture"?\s*$', head, re.MULTILINE):
+        continue
+    if re.search(r'^source:\s*"?https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/',
+                 head, re.MULTILINE):
+        continue
+    body = re.sub(r'^---\n.*?\n---\n', '', content, count=1, flags=re.DOTALL)
+    body_chars = len(re.sub(r'\s+', ' ', body).strip())
+    if body_chars < 2000:
+        teaser_shell_webpages.append(
+            f"{os.path.basename(rf)}: re-capture via the Obsidian plugin "
+            f"(DOM-walker captured a thin/teaser shell — {body_chars}-char body)")
+if teaser_shell_webpages:
+    check("Webpages captured as thin/teaser shell via DOM walker (re-capture for full body)",
+          teaser_shell_webpages)
+
 # Papers whose raw has a PDF on disk but only the scraped abstract in the body.
 # The arxiv `paper` branch used to write just the HTML abstract even after
 # downloading the PDF, so the wiki summary + search index saw a fraction of the
@@ -4816,6 +4855,60 @@ if os.path.isfile(_dead_path) and os.path.isfile(_resolved_path):
 if _resurrected:
     check("Stale dead-URL records cleared — URL later captured (issue #129)",
           _resurrected, fixed=True)
+
+# ═══════════════════════════════════════════════════
+# Raw sources that lost their identity (site/feed roots)
+# ═══════════════════════════════════════════════════
+# A raw file's `source:` must name ONE piece of content. A bare site or feed
+# root names no content at all: every capture that lands on it shares a single
+# dedup key, so the second one is reported as a duplicate of the first and the
+# wiki page ends up describing whatever the timeline happened to be showing.
+#
+# Witnessed 2026-09-17: LinkedIn's notification form
+# /feed/?highlightedUpdateUrn=urn:li:activity:<ID> carries the post id only in
+# the query, and linkedin.com is strip-all, so it canonicalized to
+# `https://linkedin.com/feed`. Five separate captures churned through that one
+# key (inbox/url-resolved.tsv) and the surviving page — "Web: LinkedIn Feed
+# Snapshot — NVIDIA Secure AI Agents" — described two unrelated posts under a
+# title matching neither. Root cause fixed in url_canonical._normalize_linkedin
+# (Form 0); this check is the catch-net for the next host that does the same.
+#
+# Deliberately narrow. The tempting broader check — "does the recorded source
+# re-derive the file's own slug?" — flags 104 healthy files in this vault,
+# because title-derived slugs are legitimate for Web Clipper captures. A check
+# that noisy trains the reader to skip lint output.
+# Owned by url_canonical (SOCIAL_ROOT_SOURCE_RE) so the pattern has one
+# spelling and one owner; lint consumes it rather than keeping a copy.
+try:
+    sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
+    from url_canonical import SOCIAL_ROOT_SOURCE_RE as _IDENTITYLESS_SOURCE_RE
+except ImportError:
+    _IDENTITYLESS_SOURCE_RE = re.compile(
+        r'^https?://(?:www\.)?(linkedin\.com/feed|linkedin\.com|x\.com/home|'
+        r'x\.com|twitter\.com/home|twitter\.com|medium\.com|substack\.com|'
+        r'news\.ycombinator\.com|reddit\.com)/?$', re.IGNORECASE)
+_RAW_SOURCE_FM_RE = re.compile(r'^source:\s*"?([^"\n]+)"?\s*$', re.MULTILINE)
+
+_identityless = []
+for _base, _dirs, _files in os.walk(os.path.join(KB, 'raw')):
+    if '.kb-trash' in _base:
+        continue
+    for _f in _files:
+        if not _f.endswith('.md'):
+            continue
+        _p = os.path.join(_base, _f)
+        try:
+            with open(_p, encoding='utf-8', errors='replace') as _fh:
+                _head = _fh.read(2048)
+        except OSError:
+            continue
+        _m = _RAW_SOURCE_FM_RE.search(_head)
+        if _m and _IDENTITYLESS_SOURCE_RE.match(_m.group(1).strip()):
+            _identityless.append(
+                f"{os.path.relpath(_p, KB)} → source: {_m.group(1).strip()} "
+                f"(no post identity; re-capture from the post's own permalink)")
+check("Raw sources recorded under a site/feed root with no post identity",
+      _identityless)
 
 # ═══════════════════════════════════════════════════
 # SUMMARY

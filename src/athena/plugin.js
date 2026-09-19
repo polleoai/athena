@@ -77,6 +77,23 @@ const _BROWSER_EXTRACT_JS = `
     // to walkChildren() for unknown tags so unknown wrapper divs don't
     // break the walk.
     var SKIP_TAGS = { script: 1, style: 1, noscript: 1, meta: 1, link: 1, head: 1, svg: 1 };
+    // Structural + consent chrome — never article content. When the thin-root
+    // guard widens the walk to <body> (component-CMS pages whose body is
+    // fragmented across siblings, so we cannot root on a clean container),
+    // site nav/header/footer/aside and cookie-consent panels would otherwise
+    // land in the raw. Witnessed: jpmorgan.com captured the article body but
+    // also a top OneTrust cookie banner + a full footer consent manager
+    // (2026-07-08). Skipping these is safe site-wide: the page title is taken
+    // separately from <title>, and article bodies never live in these
+    // landmarks. Keep <main>/<article> walkable.
+    // <button> included: interactive controls are never article prose. Anchor:
+    // jpmorgan.com chart toggles (<button class="infographic-text-version">
+    // "View text Version" / infographic-in-modal "View Infographic"), 2026-07-10.
+    // The chart's accessible description text + "Source:" line live in sibling
+    // elements, not the button, so they survive.
+    var CHROME_TAGS = { nav: 1, header: 1, footer: 1, aside: 1, button: 1 };
+    var CHROME_ROLES = { navigation: 1, banner: 1, contentinfo: 1,
+                         complementary: 1, search: 1, dialog: 1 };
     // Image chrome filter — referenced inside the walker AND the separate
     // image-list extractor at the bottom. Hoisted so both see it.
     function _isXcomChromeImageEarly(src) {
@@ -92,16 +109,79 @@ const _BROWSER_EXTRACT_JS = `
     function _htmlAttrEsc(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;'); }
     function walk(node) {
       if (!node) return '';
-      if (node.nodeType === 3) return node.nodeValue || '';  // TEXT_NODE
+      if (node.nodeType === 3) {                             // TEXT_NODE
+        // Collapse insignificant whitespace the way HTML rendering does, EXCEPT
+        // inside <pre> (where whitespace is significant). Without this, DOM
+        // source indentation survives into the markdown: leading spaces on a
+        // line (e.g. a byline emitted as "          John China") turn it into an
+        // indented CODE BLOCK, and whitespace-only text nodes between empty
+        // wrapper divs render as a big gray gap in Obsidian. Explicit
+        // [ \\t\\r\\n] instead of \\s — a lone \\s is collapsed by the template
+        // literal to a literal "s" (the bug that silently broke the chrome
+        // strip). Anchor: jpmorgan.com byline gray box, 2026-07-10.
+        var _tv = node.nodeValue || '';
+        if (node.parentElement && node.parentElement.closest &&
+            node.parentElement.closest('pre')) return _tv;
+        return _tv.replace(/[ \\t\\r\\n]+/g, ' ');
+      }
       if (node.nodeType !== 1) return '';                     // not ELEMENT_NODE
       var tag = (node.tagName || '').toLowerCase();
       if (SKIP_TAGS[tag]) return '';
+      // Drop structural + consent chrome (see CHROME_TAGS/CHROME_ROLES note).
+      if (CHROME_TAGS[tag]) return '';
+      if (node.getAttribute) {
+        var _role = (node.getAttribute('role') || '').toLowerCase();
+        if (_role && CHROME_ROLES[_role]) return '';
+        if (node.getAttribute('aria-modal') === 'true') return '';
+        var _idcls = ((node.id || '') + ' ' +
+          (typeof node.className === 'string' ? node.className : '')).toLowerCase();
+        if (/cookie|consent|onetrust|cookielaw|truste/.test(_idcls)) return '';
+        // Nav / skip-link / breadcrumb / recirculation chrome that isn't a
+        // semantic landmark. Component-CMS pages render the mega-menu, skip-link,
+        // and "related insights" carousel as plain <div>/<li>/<a> nests, so match
+        // their class TOKENS (at start or a -/_ separator, so content classes like
+        // "correlated-*" / "navy-*" don't trip). Anchors (jpmorgan.com, 2026-07-09):
+        // primary-navigation-sections mega-menu ("Back to menu"), skip-link,
+        // related-insights__cards recirculation carousel ("Read more"/"1/8").
+        if (/(?:^|[\\s_-])(?:nav(?:bar|igation)?|menu|masthead|breadcrumbs?|skip-?link|related|recommended)(?:[\\s_-]|$)/.test(_idcls)) return '';
+        // Skip CSS-hidden elements. Responsive templates ship BOTH a desktop and
+        // a mobile variant of the same block (only one is display:none for the
+        // current viewport), so capturing hidden nodes duplicates content — e.g.
+        // jpmorgan.com renders the author byline twice ("By John China" appears a
+        // second time from the ...__author-container--mobile variant). EXCEPTION:
+        // modals/dialogs/lightboxes are display:none until opened but hold real
+        // content — a chart's accessible "text version" lives inside
+        // "modal infographicModal" — so keep them and let the walk descend.
+        // Anchor: jpmorgan.com --mobile byline duplicate, 2026-07-10.
+        if (!/modal|dialog|lightbox|popup/.test(_idcls)) {
+          try {
+            var _disp = getComputedStyle(node).display;
+            if (_disp === 'none') return '';
+          } catch (e) { /* getComputedStyle unavailable — keep the node */ }
+        }
+      }
       function walkChildren() {
         var out = '';
         for (var i = 0; i < node.childNodes.length; i++) {
           out += walk(node.childNodes[i]);
         }
         return out;
+      }
+      // Custom quote components (AEM cmp-pullquote, WordPress pullquote, etc.)
+      // are <div> nests with a "pullquote"/"blockquote" class, NOT semantic
+      // <blockquote> tags. Without this the walker scatters the quote text,
+      // speaker name, title, and source link across loose paragraphs separated
+      // by the component's empty wrapper divs. Render the whole component as one
+      // blockquote instead. The ancestor guard prevents the nested pullquote-
+      // classed children (e.g. cmp-pullquote__quote, __person--name) from being
+      // re-wrapped into "> > " double quotes. Anchor: jpmorgan.com cmp-pullquote
+      // (Pat Opet / Stephen Ward quotes), 2026-07-09.
+      if (_idcls && /pull-?quote|blockquote|testimonial/.test(_idcls) &&
+          !(node.parentElement && node.parentElement.closest &&
+            node.parentElement.closest('blockquote,[class*="pullquote"],[class*="pull-quote"],[class*="blockquote"],[class*="testimonial"]'))) {
+        var _q = walkChildren().split('\\n').map(function (l) { return l.trim(); })
+          .filter(function (l) { return l; }).map(function (l) { return '> ' + l; }).join('\\n');
+        return _q ? '\\n\\n' + _q + '\\n\\n' : '';
       }
       switch (tag) {
         case 'h1': return '\\n\\n# ' + walkChildren().trim() + '\\n\\n';
@@ -281,7 +361,13 @@ const _BROWSER_EXTRACT_JS = `
 
     // ── Post-processor 3: collapse runs of 3+ blank lines ──
     function normalizeBlankRuns(text) {
-      return text.replace(/\\n{3,}/g, '\\n\\n').trim();
+      // Strip trailing spaces on each line FIRST so whitespace-only lines
+      // (DOM source indentation between empty wrapper divs) become truly empty,
+      // then collapse blank runs. Otherwise a run of "      \\n" lines survives
+      // as a big gray gap in Obsidian. Literal-space + \\n only — no \\s/\\t,
+      // which the enclosing template literal corrupts. Anchor: jpmorgan.com
+      // byline gray box, 2026-07-10.
+      return text.replace(/ +\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
     }
 
     // ── Post-processor 4: X.com chrome strip ──
@@ -526,11 +612,36 @@ const _BROWSER_EXTRACT_JS = `
       // No tweetText nodes (X.com Article view, or page that's not
       // yet hydrated): prefer the main article wrapper over the whole
       // body. Falls back to body if no article element exists.
+      //
+      // Social/article-scoped selectors are trusted as-is. The generic
+      // "article, main, [role=main]" match gets a thin-root guard:
+      // component-CMS templates (Adobe AEM "insights" pages, e.g.
+      // jpmorgan.com) wrap ONLY a hero/side-panel teaser in <article>
+      // (cmp-article-side-panel-container) while the real body lives in
+      // sibling grid columns AFTER </article>. querySelector then roots on
+      // a ~200-char shell and the entire body is dropped. When the chosen
+      // root carries only a small fraction of the document's visible text,
+      // it's a teaser wrapper, not the body — re-root on <body> so the walk
+      // sweeps the full content (residual nav/footer chrome is stripped
+      // downstream by process_clip / _clean_webpage_body + the LLM summary).
+      // Anchor: jpmorgan.com/insights/.../ai-cybersecurity-threats-funding-
+      // and-builder-priorities — 244-char <article> vs 23,025-char body,
+      // 2026-07-08. The guard is scoped to the generic match so X.com
+      // Article captures (which root on article[role="article"] amid heavy
+      // sidebar chrome) are never widened into that chrome.
       var article = document.querySelector('article[data-testid="tweet"][role="article"]')
                  || document.querySelector('article[role="article"]')
-                 || document.querySelector('main article')
-                 || document.querySelector('article, main, [role="main"]')
-                 || document.body;
+                 || document.querySelector('main article');
+      if (!article) {
+        article = document.querySelector('article, main, [role="main"]') || document.body;
+        if (article !== document.body) {
+          var _rootLen = (article.textContent || '').trim().length;
+          var _bodyLen = (document.body.textContent || '').trim().length;
+          if (_bodyLen > 2000 && _rootLen < _bodyLen * 0.3) {
+            article = document.body;
+          }
+        }
+      }
       text = walk(article);
     }
     text = cleanupXcomChrome(text);
@@ -1903,6 +2014,12 @@ class AthenaPlugin extends Plugin {
           await this._runWikiPageBuilder(updateInput);
           updateStatus("Updating cross-references...");
           await this.runMechanical("lint", [], null, view);
+          // Reindex so the refreshed page's new content is searchable (see note
+          // in the Step 7 post-processing block below).
+          updateStatus("Updating search index...");
+          try { await this.runMechanical("index", [], null, view); } catch (e) {
+            console.log("[athena] ingest: search reindex failed (non-fatal):", e && e.message);
+          }
           return { status: "updated", pageName: dupResult.page, summary: llmResult ? llmResult.summary : null };
         }
       }
@@ -2277,6 +2394,18 @@ class AthenaPlugin extends Plugin {
     // ── Step 7: POST-PROCESSING ──
     updateStatus("Updating cross-references...");
     await this.runMechanical("lint", [], null, view);
+
+    // Rebuild the search index so the new page is immediately discoverable —
+    // both in `kb search`/`kb query` AND the search-index-backed "Recently
+    // Added" view. Without this, a freshly captured page is invisible until the
+    // next hourly sync job or a manual "KB: Rebuild search index" (lint does NOT
+    // reindex). Incremental — only the new/changed page is embedded, so it's
+    // fast. Failure is non-fatal (search deps optional). Witnessed: jpmorgan.com
+    // capture absent from Recent until a manual `kb index`, 2026-07-10.
+    updateStatus("Updating search index...");
+    try { await this.runMechanical("index", [], null, view); } catch (e) {
+      console.log("[athena] ingest: search reindex failed (non-fatal):", e && e.message);
+    }
 
     // Synthesis summary overrides the LLM-naming summary in the chat
     // bubble — it's the higher-quality, body-validated version.

@@ -22,6 +22,7 @@ Pure functions, no I/O. Safe to import from anywhere.
 
 from __future__ import annotations
 
+import os
 import re
 import urllib.parse
 from enum import Enum
@@ -58,11 +59,21 @@ class SourceKind(str, Enum):
 # the ad-network params commonly seen in shared links.
 _TRACKING_PARAMS = frozenset({
     "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
-    "rcm", "ref", "usp", "s", "t",
+    "rcm", "usp",
+    # `s`, `t` and `ref` used to live here. They are share tracking on x.com
+    # and LinkedIn — and those hosts strip EVERY param below, so nothing is
+    # lost by removing them from the global list. On an arbitrary host a
+    # one-letter param is just as likely to BE the identity
+    # (example.com/view?s=A7KD92), and deleting it silently collapses every
+    # such URL onto one key. A name that short cannot carry a global policy.
+    # `usp` stays: it appears 3x in this vault's corpus (Google Drive) and is
+    # tracking in all three; identity there lives in the /file/d/<id>/ path.
     "fbclid", "gclid", "mc_eid", "mc_cid", "_ga", "_gl",
     "share", "share_via", "share_id",
     "igshid", "feature",
 })
+
+_TRACKING_PARAMS_LOWER = frozenset(p.lower() for p in _TRACKING_PARAMS)
 
 # Hosts where ALL query params are tracking noise. Stripping all is safer
 # than enumerating every param Twitter/LinkedIn invents next quarter.
@@ -198,7 +209,82 @@ class CanonicalizeResult(NamedTuple):
     url: str
     kind: SourceKind
     changed: bool
+    # True when canonicalization appears to have thrown away the part of the
+    # URL that named the content. Defaults False so existing 3-tuple callers
+    # and `._replace` sites keep working unchanged.
+    identity_lost: bool = False
 
+
+# Paths that name a place to look rather than a thing to read. A canonical
+# that lands on one of these, after a non-tracking query was dropped, is a
+# dedup key shared by every URL that ever pointed into that view.
+_CONTENTLESS_PATHS = frozenset({
+    "", "/feed", "/feed/update", "/home", "/explore",
+    "/search", "/timeline", "/dashboard",
+})
+
+# A stored raw `source:` that is a known social feed/site root. Narrower than
+# _CONTENTLESS_PATHS on purpose: lint sees only the stored URL, with no memory
+# of what was dropped to produce it, so a bare homepage there is a legitimate
+# capture rather than a defect. Owned here, imported by the lint check.
+SOCIAL_ROOT_SOURCE_RE = re.compile(
+    r'^https?://(?:www\.)?('
+    r'linkedin\.com/feed|linkedin\.com|'
+    r'x\.com/home|x\.com|twitter\.com/home|twitter\.com|'
+    r'medium\.com|substack\.com|news\.ycombinator\.com|reddit\.com'
+    r')/?$',
+    re.IGNORECASE,
+)
+
+
+def _identity_lost(original, canonical_parsed) -> bool:
+    """Did canonicalization drop the component that named the content?
+
+    Two independent signals, either of which is enough:
+
+    1. A route-shaped fragment (`#/...` or `#!...`). `canonicalize` clears the
+       fragment unconditionally, which is right for a documentation anchor
+       (`#installation`) and wrong for a client-side route, where the fragment
+       IS the address. The leading `/` or `!` is what separates the two.
+
+    2. A query carrying something outside the tracking denylist was dropped,
+       AND what remains is a content-less path. Requiring both keeps the flag
+       quiet on the healthy cases: a homepage with only `?utm_source=` has no
+       residual, and `youtube.com/watch?v=x` keeps both its param and a real
+       path.
+    """
+    frag = (original.fragment or "").strip()
+    if frag[:1] in ("/", "!"):
+        return True
+
+    if not original.query or canonical_parsed.query:
+        return False
+    residual = [
+        k for k, _ in urllib.parse.parse_qsl(original.query)
+        if k.lower() not in _TRACKING_PARAMS_LOWER
+    ]
+    if not residual:
+        return False
+    return canonical_parsed.path.rstrip("/").lower() in _CONTENTLESS_PATHS
+
+
+# Notification / email form: /feed/?highlightedUpdateUrn=urn:li:<type>:<ID>
+# The post's identity lives ONLY in the query here. `linkedin.com` is in
+# _STRIP_ALL_PARAMS_HOSTS, so unless this is lifted into the path BEFORE
+# _strip_query runs, the URL collapses to the bare feed root and every such
+# link shares one dedup key. Matched against the parsed query value, so the
+# %3A-encoded and literal-colon spellings both land here.
+_LINKEDIN_HIGHLIGHTED_URN_RE = re.compile(
+    r"^urn:li:(?:ugcPost|activity|share):(\d+)$",
+    re.IGNORECASE,
+)
+_LINKEDIN_FEED_PATH_RE = re.compile(r"^/feed/?$", re.IGNORECASE)
+# Query params LinkedIn uses to name a post. Compared case-insensitively.
+# Kept as a set rather than one param: the notification, share and in-app
+# update links each use a different name for the same thing.
+_LINKEDIN_URN_PARAMS = frozenset({
+    "highlightedupdateurn", "shareurn", "updateurn",
+})
 
 _LINKEDIN_FEED_UPDATE_RE = re.compile(
     r"^/feed/update/urn:li:(?:ugcPost|activity):(\d+)/?$",
@@ -260,6 +346,24 @@ def _normalize_linkedin(parsed):
     m = _LINKEDIN_POSTS_URN_ONLY_RE.match(parsed.path)
     if m:
         return parsed._replace(path=f"/posts/ugcpost-{m.group(1)}", query="", fragment="")
+
+    # Form 4: identity in the QUERY — /feed/?highlightedUpdateUrn=<urn> and the
+    # shareUrn / updateUrn spellings of the same thing. Lifted into the path
+    # here, BEFORE _strip_query deletes it (linkedin.com strips every param).
+    #
+    # Ordered LAST on purpose: a path that already names a post is
+    # authoritative, so a stray URN param can never hijack it. And because the
+    # lift rewrites the path and clears the query, strip-all stays the backstop
+    # — no raw param ever survives into a canonical, which is what would
+    # reintroduce the duplicate-page class this function exists to prevent.
+    if parsed.query:
+        for key, value in urllib.parse.parse_qsl(parsed.query):
+            if key.lower() not in _LINKEDIN_URN_PARAMS:
+                continue
+            m = _LINKEDIN_HIGHLIGHTED_URN_RE.match(value.strip())
+            if m:
+                return parsed._replace(
+                    path=f"/posts/ugcpost-{m.group(1)}", query="", fragment="")
     return parsed
 
 
@@ -288,6 +392,8 @@ def canonicalize(raw_url: str) -> CanonicalizeResult:
 
     if not parsed.scheme or not parsed.netloc:
         return CanonicalizeResult(url=raw_url, kind=SourceKind.OTHER, changed=False)
+
+    original = parsed  # pre-transform, for the identity-loss check below
 
     # 1. Lowercase scheme + host, strip www.
     scheme = parsed.scheme.lower()
@@ -319,7 +425,89 @@ def canonicalize(raw_url: str) -> CanonicalizeResult:
         url=canonical,
         kind=source_kind(canonical),
         changed=(canonical != raw_url),
+        identity_lost=_identity_lost(original, parsed),
     )
+
+
+IDENTITYLESS_OVERRIDE_ENV = "ATHENA_ALLOW_IDENTITYLESS"
+
+
+def identity_loss_notice(raw_url: str) -> str | None:
+    """The human-readable diagnosis for a URL that lost its identity, or None.
+
+    Every ingest entry point needs the same diagnosis; they differ only in what
+    they DO with it (refuse vs warn), so the wording lives here and cannot
+    drift between them. Pure: no env, no IO — `identity_loss_refusal` applies
+    the policy.
+    """
+    result = canonicalize(raw_url)
+    if not result.identity_lost:
+        return None
+    return (
+        f"this URL's identity is not recoverable from its canonical form: "
+        f"{raw_url}\n"
+        f"  canonicalizes to: {result.url}\n"
+        f"  That is a shared key, not this item — it names a view, so every "
+        f"URL pointing into that view collapses onto it. Capturing it would "
+        f"fetch whatever the view happens to show now.\n"
+        f"  Open the item and copy its own permalink, then add that.\n"
+        f"  To capture the view itself anyway: "
+        f"{IDENTITYLESS_OVERRIDE_ENV}=1"
+    )
+
+
+def identity_loss_refusal(raw_url: str) -> str | None:
+    """`identity_loss_notice`, unless the caller opted out via the env var.
+
+    For entry points that FETCH from the URL (kb add, unified ingest), where a
+    shared key means fetching the wrong thing. The Web Clipper uses the notice
+    directly — it already holds content the browser pulled, so refusing there
+    would discard a good capture to prevent a naming problem.
+    """
+    if os.environ.get(IDENTITYLESS_OVERRIDE_ENV):
+        return None
+    return identity_loss_notice(raw_url)
+
+
+def resolvable_url(raw_url: str) -> str:
+    """Return a URL the origin host will actually SERVE for `raw_url`.
+
+    Counterpart to `canonicalize`, which produces the dedup *identity*. They
+    differ for LinkedIn's notification/email form
+    `/feed/?highlightedUpdateUrn=urn:li:<type>:<ID>`, where navigating the URL
+    as given renders the whole feed with the post merely highlighted. Captured
+    anonymously that is a login wall; captured with a session it is a feed
+    snapshot of whatever else happened to be in the timeline — the origin of
+    the "LinkedIn Feed Snapshot" pages holding unrelated posts.
+
+    Rewrite it to the single-post permalink `/feed/update/urn:li:<type>:<ID>/`,
+    which LinkedIn serves. The URN *type* is preserved here even though
+    `canonicalize` discards it: `activity` and `ugcPost` are separate
+    namespaces, and the wrong one returns "Invalid post link".
+
+    Every other URL is returned unchanged. Pure: no network, no filesystem.
+    """
+    if not raw_url or not isinstance(raw_url, str):
+        return raw_url
+    try:
+        parsed = urllib.parse.urlparse(raw_url.strip())
+    except Exception:
+        return raw_url
+    host = parsed.netloc.lower().removeprefix("www.")
+    if not (host == "linkedin.com" or host.endswith(".linkedin.com")):
+        return raw_url
+    if not (_LINKEDIN_FEED_PATH_RE.match(parsed.path) and parsed.query):
+        return raw_url
+    for key, value in urllib.parse.parse_qsl(parsed.query):
+        if key.lower() != "highlightedupdateurn":
+            continue
+        m = _LINKEDIN_HIGHLIGHTED_URN_RE.match(value.strip())
+        if m:
+            urn_type = value.strip().split(":")[2]
+            return (f"https://www.linkedin.com/feed/update/"
+                    f"urn:li:{urn_type}:{m.group(1)}/")
+        break
+    return raw_url
 
 
 def is_unservable_canonical(canonical_url: str) -> bool:

@@ -157,8 +157,14 @@ def _capture_deep_best(clipped_url: str, canonical_url: str, vault_root: Path) -
     original yields nothing (capture-deep exited non-zero / wrote no clip).
     The fallback almost never fires; it's cheap insurance.
     """
+    # A clipped URL is normally its own best nav target, with one exception:
+    # LinkedIn's /feed/?highlightedUpdateUrn=<urn> notification form renders
+    # the whole feed. `resolvable_url` turns it into the post permalink and
+    # returns every other URL untouched.
+    from url_canonical import resolvable_url
+
     seen: set[str] = set()
-    for candidate in (clipped_url, canonical_url):
+    for candidate in (resolvable_url(clipped_url), clipped_url, canonical_url):
         candidate = (candidate or "").strip()
         if not candidate or candidate in seen:
             continue
@@ -1166,6 +1172,16 @@ def process_clip(clip_path: str | Path, vault_root: str | Path) -> Path:
         )
 
     canonical = canonicalize(url).url
+
+    # The clip already holds content the browser pulled while authenticated,
+    # so an unrecoverable identity is a NAMING problem here, not a fetch one:
+    # warn and keep the capture rather than discarding good content. The
+    # `kb add` and unified-ingest paths refuse instead, because they would be
+    # fetching FROM this URL.
+    from url_canonical import identity_loss_notice
+    _notice = identity_loss_notice(url)
+    if _notice:
+        print(f"  WARNING: {_notice}", file=sys.stderr)
 
     # Decode web-clipper-social escaped-array captures (a thread stored as a
     # pseudo-JSON array of tweet texts with \n/\" escapes + relative links)
