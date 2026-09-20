@@ -4,6 +4,14 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.7.10] — 2026-09-19
+
+Headline: **the build now leaves `main.js` where tooling expects to find it.** A follow-on to 1.7.9: the build runs correctly from a source archive, but wrote its output only into the plugin's install folder, so a checker looking for a built `main.js` in the project root reported nothing was produced. No change to how Athena behaves.
+
+### Fixed
+
+- **`npm run build` now writes `main.js` and `styles.css` to the project root** as well as into the plugin folder. The release workflow already staged them there when publishing; a plain build did not, so anything inspecting a freshly built checkout — including Obsidian's plugin review — concluded the build produced no output. Both files are build output and are ignored by git.
+
 ## [1.7.9] — 2026-09-19
 
 Headline: **Athena now builds from a source archive, not just a git clone.** No change to how Athena behaves — this release exists so the plugin can be built by anyone who downloaded the source rather than cloning it, which is how Obsidian's plugin review checks it.
