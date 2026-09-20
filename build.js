@@ -39,6 +39,24 @@ const stylesDst = ".obsidian/plugins/athena/styles.css";
 // into the plugin dir at build time. Without this copy, Obsidian shows the
 // stale manifest baked into the plugin dir on disk instead of the version
 // the source repo records.
+// Obsidian's plugin review runs `npm run build` and then looks for main.js in
+// the repository root (or dist/, build/, out/). Athena builds into the plugin
+// install dir instead, so a successful build reported "did not find a built
+// main.js file". release.yml already staged these at the root for the Release
+// assets; doing it here means a plain `npm run build` lands them too, and the
+// reviewer sees what CI sees. Both are gitignored — they are build output.
+const ROOT_ARTIFACTS = [
+  [".obsidian/plugins/athena/main.js", "main.js"],
+  [".obsidian/plugins/athena/styles.css", "styles.css"],
+];
+
+function copyRootArtifacts() {
+  for (const [src, dst] of ROOT_ARTIFACTS) {
+    fs.copyFileSync(src, dst);
+    console.log(`Copied ${src} → ${dst}`);
+  }
+}
+
 const manifestSrc = "manifest.json";
 const manifestDst = ".obsidian/plugins/athena/manifest.json";
 
@@ -119,6 +137,7 @@ async function run() {
     console.log(`Copied ${stylesSrc} → ${stylesDst}`);
     console.log(`Copied ${manifestSrc} → ${manifestDst}`);
     for (const [src, dst] of PY_SRC_DIRS) console.log(`Copied ${src}/ → ${dst}/`);
+    copyRootArtifacts();
   }
 }
 

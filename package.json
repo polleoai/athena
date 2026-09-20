@@ -1,6 +1,6 @@
 {
   "name": "athena-plugin",
-  "version": "1.7.9",
+  "version": "1.7.10",
   "private": true,
   "scripts": {
     "build": "node scripts/ensure-gryphon.js && node build.js",

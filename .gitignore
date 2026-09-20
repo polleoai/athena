@@ -19,3 +19,9 @@ node_modules
 .obsidian/plugins/athena/chat-history.json*
 .obsidian/plugins/gryphon/data.json
 .obsidian/plugins/gryphon/chat-history.json*
+
+# Build output staged at the repo root by build.js. Obsidian's plugin review
+# runs `npm run build` and expects main.js there, and release.yml uploads
+# these as the Release assets — but they are generated, never committed.
+/main.js
+/styles.css
