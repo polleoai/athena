@@ -4,6 +4,16 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-09-20
+
+Headline: **the same build fix as 1.7.10, published under a version number that sorts correctly everywhere.** No code change from 1.7.10 — only the version. If you are on 1.7.9 or earlier, this is the release to take.
+
+1.7.10 was published and correct, but tooling that compares version numbers as plain text reads `1.7.10` as *lower* than `1.7.9`, because it compares character by character and `1` sorts before `9`. Version numbers are meant to be compared piece by piece, where 10 is greater than 9. Rather than depend on every downstream tool getting that right, this release moves to `1.8.0`, which sorts above `1.7.9` under both readings.
+
+### Changed
+
+- **Version raised to 1.8.0.** Contents are identical to 1.7.10: the build writes `main.js` and `styles.css` to the project root (1.7.10), and builds from a source archive with no git metadata (1.7.9). Athena's behaviour is unchanged from 1.7.8.
+
 ## [1.7.10] — 2026-09-19
 
 Headline: **the build now leaves `main.js` where tooling expects to find it.** A follow-on to 1.7.9: the build runs correctly from a source archive, but wrote its output only into the plugin's install folder, so a checker looking for a built `main.js` in the project root reported nothing was produced. No change to how Athena behaves.
