@@ -4,6 +4,14 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-09-21
+
+Headline: **building Athena yourself now installs exactly the dependency versions the published build used.** No change to how Athena behaves.
+
+### Fixed
+
+- **A build outside CI now pins the bundled assistant's dependencies to the committed lockfile.** Athena bundles Gryphon, and Gryphon's own dependencies end up inside `main.js`. The release pipeline installed them with `npm ci`, which uses the exact versions recorded in the lockfile, while a build run anywhere else used `npm install`, which is free to pick a newer version within the allowed range. The same source could therefore produce a different `main.js` depending on when and where it was built — which is what "build output does not match the released artifact" reports. Both paths now use `npm ci` whenever the lockfile is present.
+
 ## [1.8.0] — 2026-09-20
 
 Headline: **the same build fix as 1.7.10, published under a version number that sorts correctly everywhere.** No code change from 1.7.10 — only the version. If you are on 1.7.9 or earlier, this is the release to take.
