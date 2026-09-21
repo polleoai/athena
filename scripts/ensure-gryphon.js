@@ -101,8 +101,17 @@ async function main() {
   }
 
   if (!fs.existsSync(VENDOR_NODE_MODULES)) {
-    console.log("[ensure-gryphon] installing vendor/gryphon dependencies…");
-    sh("npm --prefix vendor/gryphon install --no-audit --no-fund --silent");
+    // `npm ci` when the vendored lockfile is present, matching what release
+    // CI runs (`cd vendor/gryphon && npm ci`). `npm install` may resolve a
+    // newer in-range version than the lockfile pins, and those dependencies
+    // are bundled into main.js — so the same commit could produce different
+    // bytes depending on when and where it was built, which is exactly the
+    // "build output does not match the released artifact" finding. Fall back
+    // to install only when there is no lockfile to honour.
+    const hasLock = fs.existsSync(path.join(VENDOR_DIR, "package-lock.json"));
+    const verb = hasLock ? "ci" : "install";
+    console.log(`[ensure-gryphon] installing vendor/gryphon dependencies (npm ${verb})…`);
+    sh(`npm --prefix ${VENDOR_DIR} ${verb} --no-audit --no-fund --silent`);
   }
 }
 
