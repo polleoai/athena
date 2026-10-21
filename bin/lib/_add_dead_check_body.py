@@ -5,17 +5,23 @@ KB = Path(sys.argv[1])
 NOW = time.time()
 FRESH_S = 600  # 10 min
 
-# Dead-page signatures. Each pattern is a regex over title OR body
-# that strongly indicates a fetched-chrome page rather than real
-# content. Conservative — false positives mean dropping real captures.
-DEAD_PATTERNS = [
-    (r"page not found\s*[·•]\s*github", "GitHub 404"),
-    (r"this account doesn['']?t exist\s*[/·•]\s*x", "X account deleted"),
-    (r"hmm[.…]+this page doesn['']?t exist", "X post unavailable"),
-    (r"page not found\s*\|\s*linkedin", "LinkedIn 404"),
-    (r"^\s*404\s*[—–-]\s*not found\s*$", "Generic 404"),
-    (r"this site can'?t be reached", "Connection refused"),
-]
+# Dead-page signatures live in bin/config/dead-page-patterns.json — the one
+# source shared with kb-add duplicate detection (src/athena/plugin.js
+# findDuplicate). Each pattern is a regex over title OR body that strongly
+# indicates a fetched-chrome page rather than real content. Conservative —
+# false positives mean dropping real captures.
+# Bodies run via _heredoc_runner.run_body with NO __file__ in scope, so the
+# file is located through config._find_file (the same resolver that finds
+# athena.default.json), never via this script's own path.
+from config import _find_file
+_PATTERNS_FILE = _find_file("bin/config/dead-page-patterns.json")
+if _PATTERNS_FILE is None:
+    sys.stderr.write("  (dead-check) bin/config/dead-page-patterns.json not found — "
+                     "dead-page sweep SKIPPED; error-page captures will not be discarded\n")
+    DEAD_PATTERNS = []
+else:
+    DEAD_PATTERNS = [(e["pattern"], e["label"])
+                     for e in json.loads(_PATTERNS_FILE.read_text(encoding="utf-8"))["patterns"]]
 DEAD_RE = [(re.compile(p, re.IGNORECASE), label) for p, label in DEAD_PATTERNS]
 
 def is_dead(raw_text: str) -> str | None:

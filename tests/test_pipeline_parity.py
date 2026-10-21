@@ -207,17 +207,28 @@ def _load_old_process_clip():
         # Prefer the shortest remaining path (the canonical .../athena/bin/lib).
         tracked_path = min(tracked, key=len)
 
-        delegation_commits = subprocess.run(
-            ["git", "-C", root, "log", "-S", "from unified_ingest import",
-             "--format=%H", "--", tracked_path],
+        # --follow: the file moved (Projects/athena/bin/lib -> bin/lib when Athena
+        # became the repo root), and the delegation commit predates the move. A
+        # plain path-limited log stops at the move, finds nothing, and the test
+        # silently degrades to a skip. --name-only yields the path the file had
+        # AT each commit, which is the path `git show` needs at the old ref.
+        log = subprocess.run(
+            ["git", "-C", root, "log", "--follow", "-S", "from unified_ingest import",
+             "--format=%x00%H", "--name-only", "--", tracked_path],
             capture_output=True, text=True, check=True,
-        ).stdout.strip().splitlines()
-        if not delegation_commits:
+        ).stdout
+        hits = []
+        for rec in log.split("\x00")[1:]:
+            lines = [ln for ln in rec.splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                hits.append((lines[0], lines[-1]))
+        if not hits:
             return None
-        old_ref = delegation_commits[-1] + "^"  # parent of the delegation commit
+        first_sha, path_then = hits[-1]  # oldest: the delegation commit
+        old_ref = first_sha + "^"  # parent of the delegation commit
 
         blob = subprocess.run(
-            ["git", "-C", root, "show", f"{old_ref}:{tracked_path}"],
+            ["git", "-C", root, "show", f"{old_ref}:{path_then}"],
             capture_output=True, text=True, check=True,
         ).stdout
         if "def process_clip(" not in blob or "from unified_ingest import" in blob:

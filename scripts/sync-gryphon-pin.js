@@ -60,6 +60,26 @@ try {
 
 const { pin, pinFile } = info;
 
+// `--write <sha>` takes the commit EXPLICITLY instead of deriving it from the
+// committed gitlink. Needed in the bump workflow: there the submodule worktree
+// has been moved by `git checkout <tag>` but the superproject gitlink is not
+// updated until a later `git add vendor/gryphon`, so deriving from HEAD reads
+// the OLD pin, writes it, and then --check compares old against old and
+// passes. That shipped briefly in d87bd60 and would have reintroduced the very
+// drift it was added to prevent.
+const writeIdx = process.argv.indexOf("--write");
+if (writeIdx !== -1) {
+  const sha = (process.argv[writeIdx + 1] || "").trim();
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    console.error(`[sync-gryphon-pin] --write needs a full 40-char commit sha, got: ${sha || "(nothing)"}`);
+    process.exit(2);
+  }
+  fs.mkdirSync(path.dirname(pinFile), { recursive: true });
+  fs.writeFileSync(pinFile, `${sha}\n`);
+  console.log(`[sync-gryphon-pin] wrote ${pinFile} = ${sha} (explicit)`);
+  process.exit(0);
+}
+
 if (process.argv.includes("--check")) {
   const have = fs.existsSync(pinFile) ? fs.readFileSync(pinFile, "utf8").trim() : "";
   if (have !== pin) {
