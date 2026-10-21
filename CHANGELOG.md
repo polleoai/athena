@@ -6,17 +6,14 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [1.8.14] — 2026-10-21
 
-Headline: **Athena now bundles Gryphon 2.12.3, a security update. Please update.** This is the first public release since 1.8.1 (1.8.2–1.8.13 were internal builds), so it carries every security fix to the built-in assistant since then. **Athena now needs Obsidian 1.4.4 or newer.**
+Headline: **Athena now bundles Gryphon 2.12.3, a security update. Please update.** This is the first public release since 1.8.1 (1.8.2–1.8.13 were internal builds), so it carries the built-in assistant's security fixes since then that apply inside Athena. **Athena now needs Obsidian 1.4.4 or newer.**
 
 ### Security
 
-- **A vault can no longer turn your protections off or choose what runs.** A vault you downloaded, synced or cloned travels with its own settings. It could arrive with protections switched off, point the assistant at a program of its choosing, or carry Claude Code or Codex settings files that ran a command as soon as you started a chat. None of those settings take effect any more.
+- **A vault can no longer choose what runs when you chat.** A vault you downloaded, synced or cloned travels with its own settings. It could point the assistant at a program of its choosing, or carry Claude Code or Codex settings files that ran a command as soon as you started a chat. Neither takes effect any more.
 - **MCP servers defined inside a vault need your approval before they run**, and **Review** shows exactly what each would run. An approval added or changed outside Athena doesn't count. Athena's own knowledge-base server is unaffected.
-- **File and command checks cover far more of what the assistant can do**: every file a shell command copies, moves, links or edits; whole folders being moved or replaced; commands given to plugin and MCP tools; and Codex's own file-editing tool, which wasn't checked before.
-- **A vault's folder name can no longer run commands**, and a second name for the same folder (a shortcut, or another spelling of the path) no longer slips past the checks.
 - **Web fetches can no longer be redirected into your own network** (your computer, router or local services), and return text only, as documented.
 - **Instruction files can only bring in files from their own folder.** On Windows, a reference to a network location could have sent your sign-in credentials to another computer.
-- **When a protection can't start, you're told**, instead of the chat running without it.
 
 ### Fixed
 
@@ -38,7 +35,6 @@ Headline: **Athena now bundles Gryphon 2.12.3, a security update. Please update.
 - **Obsidian 1.4.4 or newer is required.** Older Obsidian keeps the last Athena release that works there.
 - **Custom program locations need a one-time confirmation.** If you set your own location for Claude Code, Codex, Gemini or Antigravity, you're asked once whether to keep using it on this computer.
 - **Behind a proxy?** Web fetches no longer use Obsidian's network settings. Set `HTTPS_PROXY` (and `HTTP_PROXY`, `NO_PROXY` as needed) in the environment Obsidian starts with.
-- **First start after updating** shows a notice naming any settings that loosen protection and any approved MCP servers, so you can check them once.
 
 ## [1.8.1] — 2026-09-21
 
