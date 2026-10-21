@@ -62,7 +62,13 @@ async function main() {
   if (!fs.existsSync(SENTINEL)) {
     console.log("[ensure-gryphon] vendor/gryphon is empty — initializing submodule…");
     try {
-      sh("git submodule update --init --recursive vendor/gryphon");
+      // No pathspec: `git submodule update <relative-path>` matches the pathspec
+      // against --show-prefix, which reports the filesystem's real casing
+      // (projects/athena/) and never matches an index entry recorded as
+      // Projects/athena/... . That silently failed here and fell through to the
+      // slower codeload path, masking the problem. One submodule exists, so the
+      // pathspec bought nothing. Same bug fixed in package.json's build:all.
+      sh("git submodule update --init --recursive");
     } catch {
       // No .git (source archive) or no network for the submodule — fall
       // through to the pinned-tarball path below.

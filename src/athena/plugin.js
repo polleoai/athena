@@ -858,7 +858,28 @@ const athenaKbAutocompleteSource = {
 
 // ── AthenaPlugin — KB orchestration lives here ─────────────────────
 
+// Protection settings Athena forces off because it hosts Gryphon's chat
+// without Gryphon's permission IPC server (see loadSettings). Passed to
+// Gryphon as code-level securityOverrides (gryphon-dev#29), which Gryphon
+// trusts — unlike data.json, which travels with the vault.
+// The namespace Gryphon files Athena's machine-confirmed security settings
+// under. Set in code because Gryphon no longer trusts the vault-resident
+// manifest id for this (gryphon-dev#30); "athena" matches that id, so
+// settings confirmed before this change carry over.
+const ATHENA_SECURITY_HOST_ID = "athena";
+
+const ATHENA_SECURITY_OVERRIDES = Object.freeze({
+  protectedMode: false,
+  protectedPathsEnabled: false,
+  protectedCommandsEnabled: false,
+});
+
 class AthenaPlugin extends Plugin {
+  // Gryphon's provider factory reads the host's security namespace from the
+  // plugin object (gryphon-dev#33 R43-15) — KB synthesis spawns through it
+  // too, so a CLI location confirmed in Athena is honoured there as well.
+  securityHostId = ATHENA_SECURITY_HOST_ID;
+
   async onload() {
     console.log("[athena] Plugin loaded \u2014 version", (this.manifest && this.manifest.version) || "?");
 
@@ -995,12 +1016,29 @@ class AthenaPlugin extends Plugin {
             "--append-system-prompt", ATHENA_SYSTEM_PROMPT,
           ]
         : [];
+      // Gryphon >= 2.10.1 (gryphon-dev#27) launches Claude Code with NO vault
+      // settings files, which also stops the vault CLAUDE.md auto-loading.
+      // ATHENA_SYSTEM_PROMPT says "Follow the rules in CLAUDE.md" — that file
+      // holds Athena's immutable security rules — so name it explicitly as a
+      // memory file. Built from code, never from vault config (Gryphon runs
+      // consumer-named memory as trusted text; imports stay inside the vault).
+      // Gryphon >= 2.10.4 (gryphon-dev#29) no longer enforces protection
+      // settings from data.json (it travels with the vault). Athena's
+      // protection-off is a CAPABILITY fact, not a preference — it runs no
+      // permission IPC server — so it is declared in code, per view.
+      const securityOverrides = ATHENA_SECURITY_OVERRIDES;
+      const claudeCodeScope = usesClaudeCodeCLI
+        ? { memoryFiles: [path.join(this.app.vault.adapter.basePath, "CLAUDE.md")] }
+        : undefined;
       return new AthenaChatView(leaf, this, {
         viewType: VIEW_TYPE,
         displayText: "Athena",
         icon: ICON,
         extraToolStatus: TOOL_STATUS_KB,
         extraProcessArgs: claudeCodeArgs,
+        claudeCodeScope,
+        securityOverrides,
+        securityHostId: ATHENA_SECURITY_HOST_ID,
         onBeforeSend: (text) => this._handleKbCommand(text),
         autocompleteSources: [athenaKbAutocompleteSource],
         stopStreamingHooks: [
@@ -2885,14 +2923,47 @@ class AthenaPlugin extends Plugin {
 
   // ── Duplicate detection (URL + title + content fingerprint) ──────
 
+  // Label of the dead/error-page signature `text` matches, or null.
+  // Patterns come from bin/config/dead-page-patterns.json — the same list
+  // the post-capture sweep (bin/lib/_add_dead_check_body.py) trashes on.
+  // An error page's title is not an identity: "Page Not Found | LinkedIn"
+  // is what EVERY dead LinkedIn URL returns, so title- or content-matching
+  // on it collapses unrelated posts into one "duplicate" and short-circuits
+  // a real capture (2026-09-17: an AI-infra post reported "already in KB"
+  // as [[LinkedIn: LinkedIn 404 — page not found]]).
+  deadPageLabel(text) {
+    if (!text) return null;
+    if (this._deadPageRes === undefined) {
+      this._deadPageRes = [];
+      try {
+        const fp = resolvePythonScript(this, "bin/config/dead-page-patterns.json");
+        const data = JSON.parse(fs.readFileSync(fp, "utf8"));
+        for (const e of data.patterns || []) {
+          this._deadPageRes.push({ re: new RegExp(e.pattern, "i"), label: e.label });
+        }
+      } catch (e) {
+        console.log("[athena] dead-page patterns unavailable:", e.message);
+      }
+    }
+    const head = String(text).substring(0, 3000);
+    for (const { re, label } of this._deadPageRes) {
+      if (re.test(head)) return label;
+    }
+    return null;
+  }
+
   findDuplicate(url, title, bodyLines) {
     const vaultPath = this.app.vault.adapter.basePath;
+    // An error-page capture may still match an existing page by URL (that
+    // page is genuinely the same source), but never by title or content.
+    const incomingDead = this.deadPageLabel(title)
+      || this.deadPageLabel(bodyLines ? bodyLines.slice(0, 60).join("\n") : "");
     const wikiDirs = ["wiki/format/webpages", "wiki/format/repos", "wiki/format/papers", "wiki/format/videos", "wiki/format/images"];
 
     const cleanUrl = url ? url.replace(/[?&](utm_\w+|s|t|rcm|ref|usp)=[^&]*/g, "").replace(/[?&]$/, "").replace(/\/+$/, "").toLowerCase() : "";
-    const normTitle = title ? title.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim() : "";
+    const normTitle = (title && !incomingDead) ? title.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim() : "";
     const fingerprint = [];
-    if (bodyLines && bodyLines.length > 0) {
+    if (bodyLines && bodyLines.length > 0 && !incomingDead) {
       const fullText = bodyLines.join("\n");
       const paragraphs = fullText.split(/\n\s*\n/);
       for (const p of paragraphs) {
@@ -2918,6 +2989,14 @@ class AthenaPlugin extends Plugin {
           if (cleanUrl && (contentLower.includes(cleanUrl) || contentLower.includes(url.toLowerCase()))) {
             return { page: pageName, method: "URL" };
           }
+
+          // A redirect stub's title is a stale name, and an error-titled
+          // page has no identity of its own — neither may claim a new
+          // capture by title or content.
+          const fmHead = content.substring(0, 600);
+          if (/^redirect:\s*true\s*$/m.test(fmHead)) continue;
+          const candTitle = (fmHead.match(/^title:\s*"?(.+?)"?\s*$/m) || [])[1] || "";
+          if (this.deadPageLabel(candTitle)) continue;
 
           if (normTitle && normTitle.length > 10) {
             const titleMatch = content.match(/^title:\s*"?(.+?)"?\s*$/m);
@@ -3807,6 +3886,10 @@ class AthenaSettingTab extends PluginSettingTab {
     renderGryphonSettings(this.plugin, el, {
       chrome: false,
       initialTabId: "models",
+      // Same code-declared overrides as the chat view (gryphon-dev#29), so the
+      // embedded settings show them as "Set by Athena" instead of prompting.
+      securityOverrides: ATHENA_SECURITY_OVERRIDES,
+      securityHostId: ATHENA_SECURITY_HOST_ID,
     });
 
     new Setting(el)

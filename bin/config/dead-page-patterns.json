@@ -1,0 +1,12 @@
+{
+  "_comment": "Dead/error-page signatures — the ONE source for both the post-capture sweep (bin/lib/_add_dead_check_body.py) and kb-add duplicate detection (src/athena/plugin.js findDuplicate). Each pattern is a case-insensitive regex tested against a page's title and the head of its body. Keep them conservative: the sweep TRASHES any fresh raw that matches, so a false positive drops a real capture. Patterns must be valid in both Python `re` and JavaScript RegExp (no lookbehind, no named groups, no inline flags).",
+  "patterns": [
+    {"pattern": "page not found\\s*[·•]\\s*github",                "label": "GitHub 404"},
+    {"pattern": "this account doesn['’]?t exist\\s*[/·•]\\s*x",    "label": "X account deleted"},
+    {"pattern": "hmm[.…]+this page doesn['’]?t exist",             "label": "X post unavailable"},
+    {"pattern": "page not found\\s*\\|\\s*linkedin",               "label": "LinkedIn 404"},
+    {"pattern": "\\blinkedin 404\\b",                              "label": "LinkedIn 404 (authored title)"},
+    {"pattern": "^\\s*404\\s*[—–-]\\s*not found\\s*$",            "label": "Generic 404"},
+    {"pattern": "this site can['’]?t be reached",                  "label": "Connection refused"}
+  ]
+}

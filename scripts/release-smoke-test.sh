@@ -70,6 +70,24 @@ run_pnpm_path() {
   verify_artifacts "pnpm"
 }
 
+# versions.json must declare THIS release before the tag is pushed — the
+# release workflow re-checks it, but by then the tag is already public.
+# Record with:  node scripts/versions-json.js --record
+check_versions_json() {
+  local tag
+  tag="$(node -p "require('./manifest.json').version")"
+  echo "=== versions.json gate for $tag ==="
+  local known=()
+  if command -v gh >/dev/null 2>&1 && gh release list -R polleoai/athena --limit 1000 --json tagName --jq '.[].tagName' > "${TMPDIR:-/tmp}/athena-public-releases.txt" 2>/dev/null; then
+    known=(--known-releases "${TMPDIR:-/tmp}/athena-public-releases.txt")
+  else
+    echo "  (gh unavailable — skipping the every-entry-is-a-public-release check; CI still runs it)"
+  fi
+  node scripts/versions-json.js --check --release "$tag" ${known[@]+"${known[@]}"}
+}
+
+check_versions_json
+
 if [ "${1:-}" = "--fresh" ]; then
   # Clone HEAD into a tmp dir and run the smoke test there, exactly mirroring
   # what Obsidian's sandbox sees. The current working tree is untouched.

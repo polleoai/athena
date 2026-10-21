@@ -4,6 +4,42 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.8.14] — 2026-10-21
+
+Headline: **Athena now bundles Gryphon 2.12.3, a security update. Please update.** This is the first public release since 1.8.1 (1.8.2–1.8.13 were internal builds), so it carries every security fix to the built-in assistant since then. **Athena now needs Obsidian 1.4.4 or newer.**
+
+### Security
+
+- **A vault can no longer turn your protections off or choose what runs.** A vault you downloaded, synced or cloned travels with its own settings. It could arrive with protections switched off, point the assistant at a program of its choosing, or carry Claude Code or Codex settings files that ran a command as soon as you started a chat. None of those settings take effect any more.
+- **MCP servers defined inside a vault need your approval before they run**, and **Review** shows exactly what each would run. An approval added or changed outside Athena doesn't count. Athena's own knowledge-base server is unaffected.
+- **File and command checks cover far more of what the assistant can do**: every file a shell command copies, moves, links or edits; whole folders being moved or replaced; commands given to plugin and MCP tools; and Codex's own file-editing tool, which wasn't checked before.
+- **A vault's folder name can no longer run commands**, and a second name for the same folder (a shortcut, or another spelling of the path) no longer slips past the checks.
+- **Web fetches can no longer be redirected into your own network** (your computer, router or local services), and return text only, as documented.
+- **Instruction files can only bring in files from their own folder.** On Windows, a reference to a network location could have sent your sign-in credentials to another computer.
+- **When a protection can't start, you're told**, instead of the chat running without it.
+
+### Fixed
+
+- **`kb add` no longer reports a live page as "already in your knowledge base" when the site served an error page.** Every missing page on a site shares the same error title, so a capture of one error page was matched as a duplicate of a different post and the real capture never ran.
+- **Athena's chat keeps following the rules in your vault's `CLAUDE.md`**, which hold Athena's safety rules, now that vault settings files are no longer loaded.
+- **The assistant no longer opens the Claude desktop app by mistake** when it looks for the Claude Code command-line tool on a Mac.
+- **Obsidian versions older than 1.4.4 are no longer offered Athena builds that fail there.** Athena has used a feature added in Obsidian 1.4.4 since 1.2.4, but said it supported 1.0.0.
+- **The background sync only updates the `main` branch, and only when it can do so cleanly.** *(Source-tree installs only.)*
+
+### Changed
+
+- **The newest models from Claude, OpenAI and Google**, with older ones retired from the model menus. Anyone using a retired model is moved to its successor automatically.
+- **Faster start.** The Anthropic, OpenAI and Google libraries load the first time you use that provider, not every time Obsidian starts.
+- **Find the assistant's settings from Obsidian's settings search** (Obsidian 1.13 or newer).
+- **Protection settings that Athena manages are labelled "Set by Athena"** in the assistant's settings, instead of asking you to confirm them.
+
+### Things to know
+
+- **Obsidian 1.4.4 or newer is required.** Older Obsidian keeps the last Athena release that works there.
+- **Custom program locations need a one-time confirmation.** If you set your own location for Claude Code, Codex, Gemini or Antigravity, you're asked once whether to keep using it on this computer.
+- **Behind a proxy?** Web fetches no longer use Obsidian's network settings. Set `HTTPS_PROXY` (and `HTTP_PROXY`, `NO_PROXY` as needed) in the environment Obsidian starts with.
+- **First start after updating** shows a notice naming any settings that loosen protection and any approved MCP servers, so you can check them once.
+
 ## [1.8.1] — 2026-09-21
 
 Headline: **building Athena yourself now installs exactly the dependency versions the published build used.** No change to how Athena behaves.
@@ -57,9 +93,9 @@ Headline: **pages built from components capture in full instead of landing as a 
 - **(source tree) Athena now tells you when a link cannot be traced to a single item.** Saving an address that names a view rather than a thing — a feed, a home page, a search — stops with an explanation and asks for the item's own link, instead of quietly saving the view. Pass `ATHENA_ALLOW_IDENTITYLESS=1` to save the view deliberately. The Web Clipper warns rather than refusing, since it already has the page in hand.
 - **(source tree) The health check flags saved sources that point at a feed or site root.** These are the ones worth re-saving from the item's own link.
 
-## [1.7.6] — 2026-08-02
+## [1.7.7] — 2026-08-02
 
-Headline: **the bundled assistant moves to Gryphon 2.9.6, and the plugin builds cleanly from a fresh checkout.** This release picks up Gryphon's dependency-security and housekeeping updates (2.9.3 → 2.9.6) and fixes source builds in a clean environment. Athena's own capture and synthesis behaviour is unchanged.
+Headline: **the bundled assistant moves to Gryphon 2.9.6, and the plugin builds cleanly from a fresh checkout.** This release picks up Gryphon's dependency-security and housekeeping updates (2.9.3 -> 2.9.6) and fixes source builds in a clean environment. Athena's own capture and synthesis behaviour is unchanged. (Shipped publicly as 1.7.6.)
 
 ### Security
 

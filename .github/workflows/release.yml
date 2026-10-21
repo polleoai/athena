@@ -68,6 +68,11 @@ env:
 
 jobs:
   build-and-release:
+    # Releases are published from polleoai/athena only. jivebug/athena is the
+    # dev repo: it carries the same tags (tag-on-bump-merge.yml) and, now that
+    # Athena is at its root, GitHub would otherwise run this workflow there too
+    # and publish a signed release from the dev repo on every tag.
+    if: github.repository == 'polleoai/athena'
     runs-on: ubuntu-latest
     steps:
       - name: Validate TAG_NAME shape
@@ -105,6 +110,29 @@ jobs:
           ref: ${{ env.TAG_NAME }}
           submodules: recursive
           fetch-depth: 0
+
+      # The step above proves the PINNED COMMIT is released. This one proves our
+      # two records of that pin agree: the submodule gitlink and the plain
+      # vendor/gryphon.pin that a no-git build reads. Both gates are needed and
+      # neither sees the other's failure — a drifted pin passes the released
+      # check (the submodule is fine) while shipping a different Gryphon to
+      # anyone building from a source archive.
+      - name: Assert vendor/gryphon.pin matches the submodule
+        run: node scripts/sync-gryphon-pin.js --check
+
+      # Obsidian picks what an OLDER app may install from versions.json: the
+      # highest entry whose minimum the app meets, downloaded from this repo's
+      # releases. So this tag must be recorded at the manifest's minAppVersion,
+      # no entry may under-declare its floor, and every other entry must be a
+      # real public release (else that download 404s). #230: every entry said
+      # "1.0.0" and nothing past 1.8.3 was recorded, so Obsidian 1.0–1.4.3 was
+      # offered builds that throw on the standalone setTooltip.
+      - name: Gate — versions.json declares this release honestly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list -R "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' > "$RUNNER_TEMP/public-releases.txt"
+          node scripts/versions-json.js --check --release "$TAG_NAME" --known-releases "$RUNNER_TEMP/public-releases.txt"
 
       - name: Set up Node
         uses: actions/setup-node@v4
