@@ -121,7 +121,7 @@ Athena reads the following system properties at runtime, in both the plugin and 
 
 - **Vault root path** (via `app.vault.adapter.basePath` in the plugin; via the script's working directory in the terminal). Required so the Python KB engine knows where to read/write `raw/` and `wiki/`.
 - **Operating system family** (via Node's `process.platform`) — only used to choose between macOS-specific paths (`launchd`) and Linux/Windows fallbacks in `scripts/`. Not transmitted.
-- **`os.hostname()` and `os.userInfo()`** are read by bundled Gryphon for CLI-mode auto-detection (see Gryphon's own README for full disclosure). Athena itself does not read these.
+- **Home folder location** — bundled Gryphon looks it up to find the AI command-line tools you've installed (see the *Disclosures* section of Gryphon's README). Neither Athena nor Gryphon reads your computer's name or your account details.
 - **Environment variables** consulted: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (Gryphon), `ATHENA_DISABLE_PLAYWRIGHT_PROMOTE` (test escape hatch for the LinkedIn auto-promote path). All optional; absence falls back to in-app settings.
 
 ## Privacy and data handling
