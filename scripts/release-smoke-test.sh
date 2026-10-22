@@ -88,6 +88,12 @@ check_versions_json() {
 
 check_versions_json
 
+# Same gate as release.yml's "Assert vendor/gryphon.pin matches the submodule":
+# a curated tree can carry the new submodule pointer with a stale pin file
+# (public 1.8.17's first tag did, and failed in CI).
+echo "=== vendor/gryphon.pin gate ==="
+node scripts/sync-gryphon-pin.js --check
+
 if [ "${1:-}" = "--fresh" ]; then
   # Clone HEAD into a tmp dir and run the smoke test there, exactly mirroring
   # what Obsidian's sandbox sees. The current working tree is untouched.
