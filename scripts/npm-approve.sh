@@ -26,7 +26,17 @@ id=$(gh run view "$RUN" -R "$REPO" --log | grep -o "+ $NAME@$VERSION (staged wit
 [ -n "$id" ] || { echo "npm-approve: no staged id for $NAME@$VERSION in run $RUN" >&2; exit 1; }
 
 echo "npm-approve: approving $NAME@$VERSION (staged $id, run $RUN)"
-"$ROOT/scripts/npm-2fa.sh" stage approve "$id"
+# npm runs an automated review on each staged version and refuses approval
+# (E409) until it finishes, usually a few minutes after staging.
+for attempt in $(seq 10); do
+  rc=0; out=$("$ROOT/scripts/npm-2fa.sh" stage approve "$id" 2>&1) || rc=$?
+  echo "$out"
+  [ "$rc" -eq 0 ] && break
+  grep -q "automated review hasn't finished" <<<"$out" || exit "$rc"
+  [ "$attempt" -lt 10 ] || { echo "npm-approve: npm's automated review still hasn't finished after 10 tries" >&2; exit 1; }
+  echo "npm-approve: npm's automated review hasn't finished — retrying in 2 minutes ($attempt/10)"
+  sleep 120
+done
 # npm processes a new version for a few minutes before it can be installed.
 for _ in $(seq 60); do
   npm view "$NAME@$VERSION" version --prefer-online >/dev/null 2>&1 && break
