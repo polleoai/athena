@@ -44,7 +44,7 @@ run_npm_path() {
   echo "=== npm install + build:gryphon + build ==="
   rm -rf node_modules vendor/gryphon/node_modules .obsidian/plugins/athena/main.js
   npm ci
-  (cd vendor/gryphon && npm ci)
+  (cd vendor/gryphon && npm ci --include=dev)
   # Skip `build:all` (which does `git submodule update` — only valid in a
   # git repo with vendor/gryphon registered as a submodule, i.e. the
   # standalone polleoai/athena release repo). Locally we trust the
@@ -55,6 +55,28 @@ run_npm_path() {
   verify_artifacts "npm"
 }
 
+# Obsidian's review rebuilds the release from GitHub's source archive (no .git,
+# so vendor/gryphon arrives empty and ensure-gryphon fetches it by pin) with
+# NODE_ENV=production, then compares main.js byte for byte with the released
+# asset. Do the same with HEAD and compare against the npm-path build. Before
+# this check, a production-mode install bundled 1,739 bytes less and the review
+# reported "Build output does not match" on 1.8.1, 1.8.14 and 1.8.17.
+run_review_path() {
+  local want="$1" dir got
+  echo "=== review build: source archive of HEAD + NODE_ENV=production ==="
+  dir="$(mktemp -d -t athena-review-XXXXXX)"
+  git archive HEAD | tar -x -C "$dir"
+  (cd "$dir" && npm ci --no-audit --no-fund && NODE_ENV=production npm run build)
+  got="$(shasum -a 256 "$dir/main.js" | cut -d' ' -f1)"
+  rm -rf "$dir"
+  if [ "$got" != "$want" ]; then
+    echo "[review] FAIL: main.js from the source archive ($got) differs from the npm build ($want)"
+    echo "         Obsidian's review will report \"Build output does not match the released main.js artifact\"."
+    exit 1
+  fi
+  echo "[review] OK: source-archive production build reproduces main.js byte for byte"
+}
+
 run_pnpm_path() {
   if ! command -v pnpm >/dev/null 2>&1; then
     echo "=== pnpm install + build:gryphon + build === (skipped — pnpm not installed locally)"
@@ -63,7 +85,7 @@ run_pnpm_path() {
   echo "=== pnpm install + build:gryphon + build ==="
   rm -rf node_modules vendor/gryphon/node_modules .obsidian/plugins/athena/main.js
   pnpm install --frozen-lockfile=false
-  (cd vendor/gryphon && pnpm install --frozen-lockfile=false)
+  (cd vendor/gryphon && pnpm install --frozen-lockfile=false --production=false)
   # See npm-path comment for why we skip build:all locally.
   npm run build:gryphon
   npm run build
@@ -103,10 +125,13 @@ if [ "${1:-}" = "--fresh" ]; then
   git clone --recurse-submodules "$REPO_ROOT" "$TMP_DIR/athena"
   cd "$TMP_DIR/athena"
   run_npm_path
+  run_review_path "$(shasum -a 256 main.js | cut -d' ' -f1)"
   run_pnpm_path
   echo "Fresh-clone smoke test PASSED"
 else
   run_npm_path
+  # The archive is of HEAD: commit first, or this compares against older source.
+  run_review_path "$(shasum -a 256 main.js | cut -d' ' -f1)"
   run_pnpm_path
   echo "Working-tree smoke test PASSED"
 fi

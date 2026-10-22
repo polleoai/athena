@@ -4,6 +4,14 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.8.18] — 2026-10-22
+
+Headline: **Obsidian's plugin review can now rebuild Athena exactly.** Nothing changes for you: the plugin is byte-for-byte the same as 1.8.17.
+
+### Fixed
+
+- **Obsidian's build check now reproduces the released plugin.** Obsidian rebuilds each release from its source to confirm you're running exactly the code in the repository. Since 1.8.1 that rebuild came out slightly different from the release, so the review warned "Build output does not match". The difference came from how the build installs the built-in assistant's dependencies: Obsidian's builder runs in production mode, which skipped two small packages that our release build includes. The build now installs the same packages either way, and every release is checked the way Obsidian checks it before it ships.
+
 ## [1.8.17] — 2026-10-22
 
 Headline: **Athena now bundles Gryphon 2.12.6 and is available on npm.** A maintenance release; how Athena works inside Obsidian is unchanged. (1.8.15 and 1.8.16 were internal builds.)

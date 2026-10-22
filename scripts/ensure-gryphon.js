@@ -114,10 +114,17 @@ async function main() {
     // bytes depending on when and where it was built, which is exactly the
     // "build output does not match the released artifact" finding. Fall back
     // to install only when there is no lockfile to honour.
+    //
+    // --include=dev: with NODE_ENV=production (Obsidian's review builds that
+    // way) npm skips devDependencies, which changes what else gets installed.
+    // `debug` loads `supports-color` only if it's there, and only Gryphon's dev
+    // tools pull it in — so a production install bundled 1,739 bytes less than
+    // release CI and the review reported "Build output does not match" on
+    // 1.8.1, 1.8.14 and 1.8.17. Always install what release CI installs.
     const hasLock = fs.existsSync(path.join(VENDOR_DIR, "package-lock.json"));
     const verb = hasLock ? "ci" : "install";
     console.log(`[ensure-gryphon] installing vendor/gryphon dependencies (npm ${verb})…`);
-    sh(`npm --prefix ${VENDOR_DIR} ${verb} --no-audit --no-fund --silent`);
+    sh(`npm --prefix ${VENDOR_DIR} ${verb} --include=dev --no-audit --no-fund --silent`);
   }
 }
 
