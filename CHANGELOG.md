@@ -4,6 +4,19 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.8.17] — 2026-10-22
+
+Headline: **Athena now bundles Gryphon 2.12.6 and is available on npm.** A maintenance release; how Athena works inside Obsidian is unchanged. (1.8.15 and 1.8.16 were internal builds.)
+
+### Changed
+
+- **The built-in assistant is Gryphon 2.12.6.** Gryphon's releases since 2.12.3 clean up the results of Obsidian's automated plugin review and make no change to how it works. Two small updates come with them: the chat view uses the current name for its text-wrapping style (it looks the same), and the OpenAI key test uses the current setting for keeping its reply short.
+- **Athena is published on npm as [`@polleoai/athena`](https://www.npmjs.com/package/@polleoai/athena)**: the built plugin plus its full source. Each version is built from the signed GitHub release, checked file for file, and only goes out after the maintainer approves it.
+
+### Fixed
+
+- **The README no longer says the built-in assistant reads your computer's name and account details.** It doesn't, and neither does Athena; it looks up your home folder to find the AI command-line tools you've installed.
+
 ## [1.8.14] — 2026-10-21
 
 Headline: **Athena now bundles Gryphon 2.12.3, a security update. Please update.** This is the first public release since 1.8.1 (1.8.2–1.8.13 were internal builds), so it carries the built-in assistant's security fixes since then that apply inside Athena. **Athena now needs Obsidian 1.4.4 or newer.**
