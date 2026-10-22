@@ -1,9 +1,9 @@
 {
   "packages": {
     "@polleoai/athena": {
-      "version": "1.8.17",
+      "version": "1.8.18",
       "files": {
-        "CHANGELOG.md": "bb026b2e1a655a277fede309a197ea9029416c587d4567c034ef666df87382bf",
+        "CHANGELOG.md": "0e089a447d2fa7fbdabcf85a1fa0b64fd28ca2d1f2defcf5208dcfafde92d9a7",
         "LICENSE": "3092308facb15267f1a621edd594e169e7d797a7378b4cb1b2a9a5c342a706e5",
         "README.md": "d4a4cd6730e4172bae0a234aadb39bf935c65561a1ade977c15e2c69421ef385",
         "assets/web-clipper/athena-linkedin.json": "6215288d0b20c249e2e7f7752ff4ffee82c4e758c04bd7662c64e10fb2852412",
@@ -130,8 +130,8 @@
         "bin/lib/wiki_schema.py": "7771d3c05682f8c0af687641685934ff1d5daea954b27f7b76d6521c0b854186",
         "bin/lib/wiki_writer.py": "fb80f0d46de2047e7049b4d9bf33b2ec7ba021a2e83851aeaec68049ae31e1f3",
         "main.js": "0189ca53d972cadc949b73da9094a4dbd0c5d3136cc9f7e6e4793d3f577dd81c",
-        "manifest.json": "e5b7405933794c595f86320bb36ecb1894b52d8baaaca90b2223c07e5de0de03",
-        "package.json": "34b3d1a960018ce03495354f82abc4ff920dedb2a017c7cb10f5b67cc3d09fdc",
+        "manifest.json": "ba54fa13b93a581da332f656bf36b64badffc084bfd9e0a603b16b30e34f9973",
+        "package.json": "b03e80af36975e2d54aac4c56d108441ca2992bdc4c8bd315d9de6ddc14815bd",
         "scripts/capture-deep.js": "f00341c7927b7588b2c2905d584071a2a3a1854f30e9d912e9e4ec413e6e523b",
         "server/README.md": "101a91774f88300ab2ee4b3d8beb5d8ae9d83d1e3d7a31e49a5d8ea2f79834b2",
         "server/athena/__init__.py": "048520108a32aca1170838faf72a597179869142c5a652b80cc6f8f62ecf3648",
@@ -148,7 +148,7 @@
         "src/athena/synthesis-wiki-update.js": "f2fb920811d16ff50952f3028d7546ea5b6217c5c7855b0e156b3caf18caf74f",
         "src/athena/synthesis.js": "d9048c1de4c586437b4c48d8bec11d52573da89fb6a2c233a02fe74122280216",
         "styles.css": "937416025f549e7c342bbe2ffd553f5e264ce74e2fee9fa7d275f112bcfff107",
-        "versions.json": "f32b59c8cdb52467eb04cb39d3d23263ee990edf0bde47318ca47415fafa872e"
+        "versions.json": "5b75f939815d0faeb6a27409a5adf4c4be99f5683fba1d1955ba0d9b4ab067f2"
       }
     }
   }
