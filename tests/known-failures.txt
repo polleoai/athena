@@ -1,16 +1,7 @@
 # Known failing tests, as pytest node ids. scripts/release-tests.sh fails a
 # release on any failure NOT listed here, and reports listed tests that now pass.
 # Every entry names its tracking issue. This list only shrinks.
-
-# athena-dev/athena#239 — legacy bash kb vs Python kb: help/lint output diverged
-tests/test_kb_parity.py::KbParity::test_help
-tests/test_kb_parity.py::KbParity::test_help_long_flag
-tests/test_kb_parity.py::KbParity::test_help_no_args
-tests/test_kb_parity.py::KbParity::test_help_short_flag
-tests/test_kb_parity.py::KbParity::test_lint
-tests/test_kb_parity.py::KbParity::test_lint_seeded
-
-# athena-dev/athena#239 — old vs new pipeline: new auto-queues referenced URLs
-tests/test_pipeline_parity.py::TestOldVsNewEquivalence::test_generic_clip_equivalent
-tests/test_pipeline_parity.py::TestOldVsNewEquivalence::test_linkedin_clip_equivalent
-tests/test_pipeline_parity.py::TestOldVsNewEquivalence::test_xcom_clip_equivalent
+#
+# Empty since Athena dev issue #239's fix: the help parity tests compare the frozen
+# Bash help as an ordered subset with named additions, and two Python-only lint
+# checks were double-counted or counted when clean.

@@ -17,84 +17,30 @@
  * everything down after the test — whether it passed or failed.
  */
 
-const base = require("@playwright/test");
-const { chromium } = require("playwright");
-const argus = require("@shared/argus");
+const { obsidianSpec } = require("@shared/argus").helpers.obsidianSpec;
+const { makeReadyCheck } = require("./_ready");
 
 const config = require("../argus.config.js");
 
-let nextPort = 9322;  // offset from gryphon's 9222 to avoid collision
-function pickFreePort() {
-  const port = nextPort;
-  nextPort = nextPort >= 9399 ? 9322 : nextPort + 1;
-  return port;
-}
-
-async function dismissTrustModal(page) {
-  // Obsidian shows "Trust author of this vault?" for any vault path it
-  // hasn't seen. Plugins do NOT load until the user clicks trust — so
-  // without this step, the test's plugin-loaded assertions never pass.
-  // Best-effort across label variants; silent if not present.
-  const labels = ["Trust author and enable plugins", "Trust author", "Trust"];
-  for (const label of labels) {
-    const btn = page.locator(`button:has-text("${label}")`).first();
-    try {
-      if (await btn.isVisible({ timeout: 2000 })) {
-        await btn.click();
-        return;
-      }
-    } catch (_) {
-      // try next label
-    }
-  }
-}
-
-const test = base.test.extend({
-  obsidian: async ({}, use) => {
-    const fixture = await argus.fixtures.obsidianVault.create(config.fixture);
-
-    let launch;
-    let browser;
-    try {
-      launch = await argus.launchers.obsidian.launch({
-        vaultPath: fixture.vaultPath,
-        debugPort: pickFreePort(),
-        // Cold Electron launch on a GPU-less VM is much slower than
-        // on the host (first-run shader/cache work + software
-        // rendering). 90s gives headroom; warm launches short-circuit.
-        startupTimeoutMs: 90_000,
-      });
-
-      browser = await chromium.connectOverCDP(launch.cdpEndpoint);
-      const contexts = browser.contexts();
-      const context = contexts[0] || (await browser.newContext());
-      const pages = context.pages();
-      const page = pages[0] || (await context.newPage());
-
-      // Boot settle + trust dismissal + extra wait so both plugins
-      // finish their async init (gryphon registers its view type,
-      // then athena's extension of GryphonChatView attaches).
-      await page.waitForTimeout(2000);
-      await dismissTrustModal(page);
-      await page.waitForTimeout(3000);
-
-      // Dismiss any auto-opened Settings panel (Obsidian opens
-      // Community plugins automatically when fresh ones are enabled).
-      await page.keyboard.press("Escape");
-      await page.waitForTimeout(200);
-      await page.keyboard.press("Escape");
-      await page.waitForTimeout(500);
-
-      await use({ page, context, browser, vaultPath: fixture.vaultPath });
-    } finally {
-      try { if (browser) await browser.close(); } catch (_) {}
-      try { if (launch) await launch.cleanup(); } catch (_) {}
-      try { await fixture.cleanup(); } catch (_) {}
-    }
-  },
+// argus obsidianSpec (#14 readiness): it creates the vault, launches Obsidian
+// over CDP, really waits for the "Trust author" prompt and accepts it, and
+// hands the page over only once readyCheck passes (or throws with the load
+// state). This replaces the local copy from 10e1f3ad, where isVisible's
+// ignored timeout plus fixed sleeps could miss the prompt, and two Escapes
+// then closed it without trusting: no plugin loaded.
+const { test, expect } = obsidianSpec({
+  config,
+  playwrightTest: require("@playwright/test"), // the runner's own instance (OR-9)
+  basePort: 9322, maxPort: 9399,               // offset from gryphon's 9222
+  // A cold Electron launch on a GPU-less VM is slow; warm launches return early.
+  startupTimeoutMs: 90_000,
+  // Readiness has its own budget (argus default 30 s). Matrix -3 hit it with
+  // gryphon not loaded; 120 s tells a slow cold load from a load that fails.
+  readyTimeoutMs: 120_000,
+  // athenaReady, plus each plugin's known/enabled/loaded flags and the
+  // page's console errors logged to the run output (see _ready.js).
+  readyCheck: makeReadyCheck(),
 });
-
-const expect = base.expect;
 
 /**
  * Open Athena's chat view via its registered command, returning a

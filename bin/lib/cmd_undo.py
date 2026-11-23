@@ -30,17 +30,22 @@ def handle(argv: List[str], root: str) -> int:
     print(f"  Files: {len(last_manifest.get('deleted', last_manifest.get('files',[]))) + len(last_manifest.get('modified',[]))}")
     print()
 
+    import audit  # #180: a declined prompt is logged as deny
+    reason = "--yes"
     if not confirmed:
         try:
             answer = input("Restore? (y/N) ").strip().lower()
-            if answer != "y":
-                print("Cancelled.")
-                return 0
         except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
+            answer = ""
+            print()
+        if answer != "y":
+            audit.record(KB, "kb undo", last_manifest.get("description", last_name), "deny",
+                         "user-cancelled")
+            print("Cancelled.")
             return 0
+        reason = "user-confirmed"
 
-    ok, msg = restore_last(KB)
+    ok, msg = restore_last(KB, reason=reason)
     print(msg)
     if ok:
         print("Run 'kb lint' to verify.")

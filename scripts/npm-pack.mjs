@@ -34,7 +34,7 @@ const NAME = "@polleoai/athena";
 const FILES = [
   "main.js", "manifest.json", "styles.css", "versions.json",
   "README.md", "LICENSE", "CHANGELOG.md",
-  "bin", "server", "src", "assets", "scripts/capture-deep.js",
+  "bin", "server", "src", "assets", "scripts/capture-deep.js", "scripts/lib/url-guard.js",
 ];
 // Never shipped, wherever they appear inside FILES.
 const SKIP = (name) => name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc") || name === "node_modules";

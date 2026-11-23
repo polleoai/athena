@@ -64,7 +64,7 @@ test.describe("AT-4/5/6: kb add <url> matrix (real-network, gated)", () => {
   // only because it has an incidental Homebrew `deno`; a fresh Linux/Windows
   // guest with `node` present but no deno fails, because yt-dlp auto-enables
   // only deno. The fix lives in arcus (detect+use the `node` already on PATH):
-  // see athena-dev/arcus docs/requirements-youtube-transcript-js-runtime.md
+  // see arcus docs/requirements-youtube-transcript-js-runtime.md
   // (commit 70641b2). A red HERE means "arcus JS-runtime fix not yet shipped,"
   // NOT a kb/kb-capture port regression. Goes green automatically once arcus
   // R1 lands and the guest's existing node is used — no harness change needed.

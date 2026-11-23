@@ -231,13 +231,59 @@ def _helper(args: list[str], *, capture_output: bool = False, text: bool = True,
     return _dispatch_helper_inprocess(args, capture_output=capture_output)
 
 
+# ── arcus fallbacks: never silent (2026-11-22) ───────────────────────────────
+# With no Playwright Chromium on the Max (about 2026-10 to 11-22) every arcus
+# browser capture failed and capture quietly used oembed text, a title-only
+# placeholder, the abstract or inline yt-dlp; the raw looked like any other.
+# A fallback is allowed, but it prints one WARN line with arcus's reason, and
+# the raw carries `extracted_via_fallback:` (lint lists those).
+_ADAPTER_LINE = re.compile(r"^\s*(?:arcus_html|arcus_video|arcus_file|ingest-file): (.+)$")
+
+
+def _arcus_reason(proc) -> str:
+    """Why an arcus helper gave nothing usable: the adapter's own error line
+    (`<adapter>: <error>` on stderr, carrying arcus's reason), else its exit
+    code or how little it returned."""
+    from arcus_errors import one_line
+    for ln in reversed((getattr(proc, "stderr", "") or "").splitlines()):
+        m = _ADAPTER_LINE.match(ln)
+        if m:
+            return one_line(m.group(1))
+    if getattr(proc, "returncode", 0):
+        return f"arcus helper exited {proc.returncode} with no reason"
+    return f"arcus returned {len((getattr(proc, 'stdout', '') or '').strip())} chars"
+
+
+def _note_fallback(state: dict, using: str, reason: str) -> None:
+    """Record a fallback for the raw's frontmatter and print its one WARN line."""
+    from arcus_errors import one_line
+    reason = one_line(reason) or "no reason given"
+    state.setdefault("fallbacks", []).append(f"{using}: {reason}")
+    print(f"  WARN: arcus failed ({reason}); using {using} instead")
+
+
+def _fallback_extras(state: dict) -> list[str]:
+    """The `extracted_via_fallback=` extra for a raw writer, if any."""
+    fb = state.get("fallbacks") or []
+    return [f"extracted_via_fallback={'; '.join(fb)}"] if fb else []
+
+
 def _curl(args: list[str], timeout_extra: int = 30) -> str:
     """Run curl, returning stdout (text) or '' on any failure / missing curl —
-    mirroring the Bash `curl ... 2>/dev/null || echo ""` pattern."""
-    try:
-        proc = _run(["curl", *args], capture_output=True, text=True,
+    mirroring the Bash `curl ... 2>/dev/null || echo ""` pattern.
+
+    A URL argument goes through url_safety.curl_hops (#243): curl's own DNS
+    and -L are replaced by a checked, pinned hop loop, so neither a redirect
+    nor a name that resolves to a private address reaches the local network.
+    """
+    def run(cmd):
+        return _run(cmd, capture_output=True, text=True,
                     errors="replace", timeout=timeout_extra)
-        return proc.stdout
+    try:
+        if any(a.startswith(("http://", "https://")) for a in args):
+            from url_safety import curl_hops
+            return curl_hops(args, run)
+        return run(["curl", *args]).stdout
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return ""
 
@@ -432,6 +478,27 @@ def raw_dirs() -> dict[str, str]:
 
 
 # ── Collision guard (port of resolve_raw_path) ───────────────────────────────
+def _existing_by_source(raw_file: str, url: str, source_type: str) -> str:
+    """`raw_file`, or the existing raw that already records this source.
+
+    A changed slug scheme (arxiv-2312.00752 in May, arxiv-2312-00752 in
+    October) hid the existing raw from a filename-only check, and a second
+    one was written; 5 arXiv papers had twins that way (2026-11-22).
+    raw_writer routes the write itself too; this makes the early
+    "already exists" branches see it."""
+    if os.path.isfile(raw_file):
+        return raw_file
+    try:
+        from raw_writer import existing_raw_for
+        found = existing_raw_for(KB_ROOT, source_type, url)
+    except Exception:  # noqa: BLE001 — the lookup is a guard, not a gate
+        return raw_file
+    if found is not None:
+        print(f"  Already captured as {_relpath(str(found))} (same source)")
+        return str(found)
+    return raw_file
+
+
 def resolve_raw_path(raw_file: str, url: str) -> str:
     if not os.path.isfile(raw_file):
         return raw_file
@@ -586,6 +653,7 @@ def resolve_tweet(url: str, original_url: str, state: dict) -> str:
     # tweet captures stay consistent. Falls back to arcus (Playwright) and then
     # the oembed text below if syndication is unavailable.
     syn_body = ""
+    syn_incomplete = False
     try:
         import fetch_tweet as _ft
         _parsed = _ft.parse_status_url(clean_tweet)
@@ -596,6 +664,7 @@ def resolve_tweet(url: str, original_url: str, state: dict) -> str:
                     _cleanup()
                     sys.exit(0)   # deep-capture wrote the full-article raw
                 syn_body = _ft.build_body(clean_tweet, _data)
+                syn_incomplete = _ft.long_text_missing(_data)
                 _art_title = _ft.article_title(_data)
                 if _art_title and not state.get("desc"):
                     state["desc"] = _art_title
@@ -604,9 +673,29 @@ def resolve_tweet(url: str, original_url: str, state: dict) -> str:
 
     # >= 80 chars: reject a near-empty/error-shaped syndication body (frontmatter
     # + a stub line clears ~80) and fall through to arcus/oembed for those.
-    if syn_body and len(syn_body) >= 80:
+    if syn_body and len(syn_body) >= 80 and not syn_incomplete:
         tweet_text = syn_body
         print(f"  Captured {len(tweet_text)} chars via syndication CDN")
+    elif syn_body and syn_incomplete:
+        # A long post whose full text syndication no longer serves: its body
+        # is only the ~280-char preview. Try arcus (a rendered page) for the
+        # full text; keep the marked-incomplete preview if that fails or
+        # returns something that isn't this post.
+        print("  Syndication served only the preview of a long post — trying arcus for the full text...")
+        proc = _helper([os.path.join(KB_ROOT, "bin", "lib", "arcus_html.py"),
+                        "--vault", KB_ROOT, "--url", clean_tweet, "--print-body"],
+                       capture_output=True, text=True, errors="replace")
+        pw_text = proc.stdout if proc.returncode == 0 else ""
+        if _ft.fuller_capture(pw_text, _data):
+            tweet_text = pw_text
+            print(f"  Captured {len(tweet_text)} chars via arcus (full long post)")
+        else:
+            tweet_text = syn_body
+            state["capture_incomplete"] = _ft.INCOMPLETE_REASON
+            reason = (_arcus_reason(proc) if not pw_text
+                      else "arcus text was not a fuller copy of this post")
+            _note_fallback(state, "only the opening of this long post (marked capture_incomplete; "
+                           "paste the full text with `kb add` to replace it)", reason)
     else:
         # ALWAYS prefer arcus for X tweets (oembed truncates). arcus_html
         # --print-body emits the body on stdout and `IMG: <url>` lines on
@@ -624,10 +713,9 @@ def resolve_tweet(url: str, original_url: str, state: dict) -> str:
             img_count = sum(1 for ln in (proc.stderr or "").splitlines()
                             if ln.startswith("IMG: "))
             print(f"  Captured {len(tweet_text)} chars + {img_count} images")
-        elif truncated:
-            print("  arcus returned no content — using oembed text")
         else:
-            print("  arcus failed; oembed text retained")
+            _note_fallback(state, "the oembed text" + (" (truncated)" if truncated else ""),
+                           _arcus_reason(proc))
     # Record discovered destination tweet(s) in the pointer's own raw body so
     # extract_canonical_urls + the lint cross-link check can establish the
     # bidirectional reference once the destination is ingested. (C1)
@@ -759,8 +847,8 @@ def resolve_linkedin(url: str, state: dict, nav_url: str = ""):
         if li_title and not state.get("desc"):
             state["desc"] = li_title
     else:
-        print("  Could not extract content (private post or login required)")
-        print("  Tip: Use Web Clipper to capture this post from your browser")
+        _note_fallback(state, "the generic page capture (private post or login required? "
+                       "Web Clipper can capture it from your browser)", _arcus_reason(proc))
     return url, False
 
 
@@ -887,6 +975,7 @@ def health_check(url: str, type_: str) -> None:
 def handle_webpage(url, slug_, date, dirs, state) -> tuple[str, str]:
     raw_file = os.path.join(dirs["webpages"], f"{slug_}.md")
     raw_file = resolve_raw_path(raw_file, url)
+    raw_file = _existing_by_source(raw_file, url, "webpage")
     if os.path.isfile(raw_file):
         die(f"already exists: {raw_file}")
 
@@ -932,7 +1021,7 @@ def handle_webpage(url, slug_, date, dirs, state) -> tuple[str, str]:
                         title = ln[:200]
                         break
         else:
-            print("  arcus returned insufficient content")
+            _note_fallback(state, "a title-only placeholder", _arcus_reason(proc))
 
     if not content_ok:
         title = _curl_title(url)
@@ -1000,7 +1089,10 @@ def handle_webpage(url, slug_, date, dirs, state) -> tuple[str, str]:
     body = "\n".join(out) + "\n" + content
     raw_file = wiki_schema_write(
         source_type="webpage", url=url, title=title, body=body,
-        extras=["clipped_via=kb-capture", f"clipped_at={date}"])
+        extras=["clipped_via=kb-capture", f"clipped_at={date}"]
+        + ([f"capture_incomplete={state['capture_incomplete']}"]
+           if state.get("capture_incomplete") else [])
+        + _fallback_extras(state))
     return raw_file, title
 
 
@@ -1084,6 +1176,7 @@ def _pypi_repo(pkg: str) -> str:
 def handle_repo(url, slug_, date, dirs, state) -> tuple[str, str]:
     raw_file = os.path.join(dirs["repos"], f"{slug_}.md")
     raw_file = resolve_raw_path(raw_file, url)
+    raw_file = _existing_by_source(raw_file, url, "repo")
     if os.path.isfile(raw_file):
         die(f"already exists: {raw_file}")
 
@@ -1202,13 +1295,14 @@ def handle_repo(url, slug_, date, dirs, state) -> tuple[str, str]:
     raw_file = wiki_schema_write(
         source_type="repo", url=url, title=parts, body=body,
         extras=["clipped_via=kb-capture", f"clipped_at={date}",
-                f"stars={repo_stars}", f"language={repo_lang}"])
+                f"stars={repo_stars}", f"language={repo_lang}"] + _fallback_extras(state))
     return raw_file, parts
 
 
 def handle_paper(url, slug_, date, dirs, state) -> tuple[str, str]:
     raw_file = os.path.join(dirs["papers"], f"{slug_}.md")
     raw_file = resolve_raw_path(raw_file, url)
+    raw_file = _existing_by_source(raw_file, url, "paper")
     if os.path.isfile(raw_file):
         # Idempotent re-capture. The paper is already on disk — most commonly
         # because a second concurrent clip watcher raced us to it (the Obsidian
@@ -1218,8 +1312,12 @@ def handle_paper(url, slug_, date, dirs, state) -> tuple[str, str]:
         # of a spurious "Clip processing failed" toast. (Prior behaviour:
         # die("already exists") → non-zero exit → recovery reported failure even
         # though the winning watcher had captured the paper fine.)
-        pdf_sibling = os.path.join(dirs["papers"], f"{slug_}.pdf")
-        state["pdf_file"] = pdf_sibling if os.path.isfile(pdf_sibling) else ""
+        # The PDF may carry either name (the slug, or the existing raw's stem
+        # when that raw was found by source under an older slug scheme).
+        pdf_sibling = next((c for c in (os.path.join(dirs["papers"], f"{slug_}.pdf"),
+                                        os.path.join(dirs["papers"], f"{Path(raw_file).stem}.pdf"))
+                            if os.path.isfile(c)), "")
+        state["pdf_file"] = pdf_sibling
         return raw_file, (_title_from_raw(raw_file) or "Untitled Paper")
 
     title = ""
@@ -1282,11 +1380,13 @@ def handle_paper(url, slug_, date, dirs, state) -> tuple[str, str]:
         elif proc.returncode == 2:
             print("ingest-file declined; falling back to webpage flow")
         else:
-            die("Capture failed. Check the URL and try again.")
+            die(f"Capture failed ({_arcus_reason(proc)}). Check the URL and try again.")
 
     # Extract the full paper text from the downloaded PDF via arcus, so the
     # wiki summary and search index see the whole paper — not just the abstract.
-    full_text = _extract_pdf_fulltext(pdf_file) if pdf_file else ""
+    # Its figures (arcus >= 0.8.0) go to raw/assets/<slug>/, beside the raw.
+    full_text = (_extract_pdf_fulltext(pdf_file, state, vault=KB_ROOT, asset_slug=slug_)
+                 if pdf_file else "")
 
     title = title or "Untitled Paper"
     out: list[str] = []
@@ -1301,6 +1401,8 @@ def handle_paper(url, slug_, date, dirs, state) -> tuple[str, str]:
     else:
         fetched = "abstract"
     out.append(f"- **Content fetched:** yes ({fetched})")
+    if state.get("figures_note"):
+        out.append(f"- **Figures:** {state['figures_note']}")
     out.append("")
     out.append("## Abstract")
     out.append("")
@@ -1319,7 +1421,7 @@ def handle_paper(url, slug_, date, dirs, state) -> tuple[str, str]:
     raw_file = wiki_schema_write(
         source_type="paper", url=url, title=title, body=body, slug_arg=slug_,
         extras=["clipped_via=kb-capture", f"clipped_at={date}",
-                f"authors={authors}"])
+                f"authors={authors}"] + _fallback_extras(state))
     state["pdf_file"] = pdf_file
     return raw_file, title
 
@@ -1338,9 +1440,22 @@ def handle_file(url, slug_, date, dirs, state) -> tuple[str, str]:
         die("Capture failed. Check the URL and try again.")
 
 
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def _is_youtube_host(url: str) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _YOUTUBE_HOSTS)
+
+
 def handle_video(url, slug_, date, dirs, state) -> tuple[str, str]:
     raw_file = os.path.join(dirs["videos"], f"{slug_}.md")
     raw_file = resolve_raw_path(raw_file, url)
+    raw_file = _existing_by_source(raw_file, url, "video")
     if os.path.isfile(raw_file):
         die(f"already exists: {raw_file}")
 
@@ -1350,13 +1465,23 @@ def handle_video(url, slug_, date, dirs, state) -> tuple[str, str]:
     duration = ""
     transcript = ""
 
+    # #243: detect_type routes on a substring ("youtu.be/" anywhere), and
+    # yt-dlp's generic extractor follows redirects with its own DNS. So
+    # yt-dlp (and arcus, which wraps it) runs only on YouTube's own hosts,
+    # never on a name resolving to a private address; anything else takes
+    # the guarded curl page fetch below.
+    from url_safety import resolved_url_reason
+    _reason = resolved_url_reason(url)
+    if _reason:
+        die(f"refusing to fetch non-public URL {url}: {_reason}")
     ytdlp_ok = False
-    try:
-        proc = _run([PYBIN, "-m", "yt_dlp", "--version"],
-                    capture_output=True, text=True)
-        ytdlp_ok = proc.returncode == 0
-    except (FileNotFoundError, OSError):
-        ytdlp_ok = False
+    if _is_youtube_host(url):
+        try:
+            proc = _run([PYBIN, "-m", "yt_dlp", "--version"],
+                        capture_output=True, text=True)
+            ytdlp_ok = proc.returncode == 0
+        except (FileNotFoundError, OSError):
+            ytdlp_ok = False
 
     used_arcus = False
     if ytdlp_ok:
@@ -1429,10 +1554,10 @@ def handle_video(url, slug_, date, dirs, state) -> tuple[str, str]:
             used_arcus = True
             print(f"Extracted via arcus: {_relpath(raw_file)}")
         else:
-            print("arcus extraction failed, falling back to inline yt-dlp:")
             with open(arcus_err, encoding="utf-8", errors="replace") as efh:
-                for ln in efh.read().splitlines():
-                    print(f"  {ln}")
+                err_text = efh.read()
+            _note_fallback(state, "inline yt-dlp", _arcus_reason(
+                subprocess.CompletedProcess(cmd, proc.returncode, proc.stdout, err_text)))
 
         if not used_arcus:
             print("Extracting transcript...")
@@ -1482,7 +1607,7 @@ def handle_video(url, slug_, date, dirs, state) -> tuple[str, str]:
         raw_file = wiki_schema_write(
             source_type="video", url=url, title=title, body=body,
             extras=["clipped_via=kb-capture", f"clipped_at={date}",
-                    f"channel={channel}", f"duration={duration}"])
+                    f"channel={channel}", f"duration={duration}"] + _fallback_extras(state))
     return raw_file, title
 
 
@@ -1535,7 +1660,8 @@ def _is_pdf(path: str) -> bool:
         return False
 
 
-def _extract_pdf_fulltext(pdf_path: str) -> str:
+def _extract_pdf_fulltext(pdf_path: str, state: dict | None = None, *,
+                          vault: str | None = None, asset_slug: str | None = None) -> str:
     """Return the full extracted text of a local PDF via arcus, or "" on any
     failure.
 
@@ -1548,10 +1674,20 @@ def _extract_pdf_fulltext(pdf_path: str) -> str:
     """
     try:
         import arcus_file  # bin/lib is already on sys.path (see LIB above)
-        result = arcus_file._extract_via_arcus(Path(pdf_path), "pdf")
-    except Exception:  # noqa: BLE001 — extraction is best-effort enrichment
+        result = arcus_file._extract_via_arcus(
+            Path(pdf_path), "pdf", vault=Path(vault) if vault else None, asset_slug=asset_slug)
+    except Exception as e:  # noqa: BLE001 — best-effort, but never silent
+        if state is not None:
+            _note_fallback(state, "the abstract only", f"{type(e).__name__}: {e}")
         return ""
-    return (result.get("text") or "").strip()
+    text = (result.get("text") or "").strip()
+    if state is not None:
+        note = arcus_file.figures_note(result.get("figures") or [], result.get("figures_skipped") or [])
+        if note:
+            state["figures_note"] = note
+    if not text and state is not None:
+        _note_fallback(state, "the abstract only", "arcus returned no PDF text")
+    return text
 
 
 def _title_from_raw(raw_file: str) -> str:
@@ -1677,6 +1813,13 @@ def main(argv: list[str]) -> int:
     else:
         die("invalid URL: missing scheme (expected http:// or https://)")
 
+    # Never fetch the local machine or a private network (#242, SSRF; security
+    # rules 11-12) — whoever put the URL in the inbox.
+    from url_safety import internal_url_reason
+    _internal = internal_url_reason(url)
+    if _internal:
+        die(f"refusing to fetch {url}: {_internal}")
+
     # Preserve the raw pre-canonicalize URL as the FETCH target for hosts whose
     # canonical dedup form isn't a servable URL (LinkedIn share/activity URNs →
     # synthetic /posts/ugcpost-<id>, which LinkedIn rejects). canonicalize() is
@@ -1697,9 +1840,18 @@ def main(argv: list[str]) -> int:
     state: dict = {"desc": desc, "keywords": keywords, "category": category,
                    "discovered_via": "", "content_chars": None, "pdf_file": ""}
 
-    # Tweet / social resolution.
+    # Tweet / social resolution. Each resolver may swap `url` for a link found
+    # in the post (t.co destination, LinkedIn external link, Reddit's GitHub
+    # link) — content the page controls, and the next resolver FETCHES it. So
+    # check after every swap, before the next gate (#242).
+    def _refuse_internal(u: str) -> None:
+        reason = internal_url_reason(u)
+        if reason:
+            die(f"refusing to fetch {u} (resolved from {original_url}): {reason}")
+
     if re.search(r"x\.com/[^/]+/status/", url) or re.search(r"twitter\.com/[^/]+/status/", url):
         url = resolve_tweet(url, original_url, state)
+        _refuse_internal(url)
 
     if "linkedin.com/posts/" in url or "linkedin.com/pulse/" in url:
         new_url, should_exit = resolve_linkedin(url, state, nav_url=raw_input_url)
@@ -1707,9 +1859,11 @@ def main(argv: list[str]) -> int:
             _cleanup()
             return 0
         url = new_url
+        _refuse_internal(url)
 
     if re.search(r"reddit\.com/r/[^/]+/comments/", url):
         url = resolve_reddit(url, state)
+        _refuse_internal(url)
 
     type_ = detect_type(url)
     slug_ = url_to_slug(url, type_)

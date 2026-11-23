@@ -4,6 +4,75 @@ All notable changes to the Athena Obsidian plugin are documented here. Format fo
 
 ## [Unreleased]
 
+## [1.8.24] — 2026-11-23
+
+Headline: **The browser used for deep captures refuses addresses it can't verify.** The first public release since 1.8.18 (includes 1.8.19 to 1.8.23).
+
+### Security
+
+- **Deep captures refuse what they can't check.** When the name of a site can't be looked up, the capture browser now refuses it instead of letting it through, and three rare forms of internet address that hide a local address are refused too.
+
+## [1.8.23] — 2026-11-23
+
+Headline: **The public package includes every helper its scripts need.** The first public release since 1.8.18 (includes 1.8.19 to 1.8.22).
+
+### Fixed
+
+- **The deep-capture script and the model-list helpers now ship with the files they load**, so they don't fail on a fresh install of the public package.
+
+## [1.8.22] — 2026-11-23
+
+Headline: **Long papers you saved earlier can get their missing text back, and the files Athena ships carry no one's personal details.**
+
+### Added
+
+- **`kb backfill-fulltext`** restores the text that long papers lost to the old 50,000-character limit. It re-reads each paper's saved PDF and adds only the missing end of the text, never changes what's already there, leaves your wiki pages alone, and `kb undo` reverts a whole run. `--dry-run` shows what it would do.
+
+### Fixed
+
+- **No personal details in the files Athena ships.** Example data in tests, a filter in the LinkedIn cleanup, and the background-job files for the hourly sync used one person's name, profile and home folder. The job files are now templates that the installer fills in with your own folders, and the rest is generic.
+
+## [1.8.21] — 2026-11-22
+
+Headline: **Papers keep their figures and their full text, and a capture that falls short now says so.** Not released publicly yet.
+
+### Added
+
+- **Figures in captured papers.** A captured PDF keeps its figures: they are saved in `raw/assets/<note>/` and shown at their captions, and the note says how many were kept or skipped.
+- **`kb backfill-figures`** adds figures to papers you captured before. It only adds, never removes or reorders text, leaves your wiki pages alone, asks before it starts, and `kb undo` reverts a whole run. `--dry-run` shows what it would do.
+- **`kb merge-raw <note> --into "<page>"`** folds a duplicate source note (one with no page of its own) into the page that already covers it. No text changes; `kb undo` reverts it.
+- **An hourly check that captures can run.** The hourly maintenance run now tests that the capture browser starts and video support loads, and records the result, so a broken capture setup is noticed within the hour.
+
+### Fixed
+
+- **Long PDFs come in whole.** The PDF reader cut text at 50,000 characters, so long papers were saved only in part.
+- **A capture that falls back is never silent.** When the browser capture can't run and Athena uses a weaker source instead (the post preview, a title-only placeholder, the abstract, a basic video download), it prints one warning with the reason and marks the note; `kb lint` lists such notes for a re-capture.
+- **One source, one note.** Capturing a source that is already in your knowledge base updates the existing note instead of writing a second one, even when its file name differs or the address is a different form of the same paper (abstract page versus PDF). `kb lint` lists any duplicates left from before.
+- **Deleting a page takes its images with it.** `kb delete` now moves a note's saved images to the trash with it, and `kb undo` brings them back.
+- **Automatic renames no longer lose the note.** A lint fix that renames a generically named note (`untitled.md`, `post-linkedin.md`) could leave the note in the trash instead of under its new name; it now renames it properly, images included.
+- A lint check counted itself twice, which changed the check total in `kb lint`'s summary.
+
+### Security
+
+- **Captured pages can no longer make Athena reach your own machine or local network.** A page can point at addresses like `localhost`, your router, or the cloud-metadata address `169.254.169.254` through an embedded frame, an image, a link Athena follows, a redirect, or a web address whose name secretly points at a private address. Athena now checks every one of those before it connects, at every step of a redirect, and in the browser it uses for LinkedIn and X articles. Such addresses are skipped and never saved into your vault (#242, #243).
+- **Redirects can't lead captures to your own machine either.** The check that keeps captures away from `localhost`, your local network and cloud-metadata addresses now applies to every hop of a redirect inside the capture engine, including its browser and video downloads, and to proxy settings that used to let video downloads around it.
+
+## [1.8.20] — 2026-11-20
+
+Headline: **Athena now bundles Gryphon 2.13.1.** An automated update of the built-in assistant; not released publicly yet.
+
+### Changed
+
+- **The built-in assistant is Gryphon 2.13.1**, a security fix for apps that set a spending cap on a Gryphon call: a call whose cost the AI service doesn't report now stops at the cap instead of counting as free. Athena sets no such cap itself, so nothing changes in how Athena works.
+
+## [1.8.19] — 2026-11-17
+
+Headline: **Athena now bundles Gryphon 2.13.0.** An automated update of the built-in assistant; not released publicly yet.
+
+### Changed
+
+- **The built-in assistant is Gryphon 2.13.0.** Claude Fable 5.2 and Claude Haiku 5.5 replace Fable 5.1 and Haiku 4.5 in the model list, and a saved choice of an older one moves to the newer version automatically. Antigravity works again after its own update broke it.
+
 ## [1.8.18] — 2026-10-22
 
 Headline: **Obsidian's plugin review can now rebuild Athena exactly.** Nothing changes for you: the plugin is byte-for-byte the same as 1.8.17.
@@ -354,7 +423,7 @@ Consolidates 1.2.1–1.2.4 (the intermediate bumps were vendored-Gryphon refresh
 
 ## [1.2.0] — 2026-05-18
 
-**arcus cutover (Plan A.2b)**. Athena's per-format content extraction (HTML pages incl. X.com tweets, PDFs, DOCX/XLSX/PPTX/EPUB, YouTube transcripts) now goes through the new [arcus](https://github.com/athena-dev/arcus) content-extraction kernel. Athena owns vault-aware orchestration; arcus owns single-source extraction.
+**arcus cutover (Plan A.2b)**. Athena's per-format content extraction (HTML pages incl. X.com tweets, PDFs, DOCX/XLSX/PPTX/EPUB, YouTube transcripts) now goes through the new [arcus](https://github.com/polleoai/arcus) content-extraction kernel. Athena owns vault-aware orchestration; arcus owns single-source extraction.
 
 ### Added
 

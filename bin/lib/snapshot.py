@@ -10,10 +10,70 @@ Usage:
     from snapshot import trash_files, snapshot_files, restore_last, purge_old, list_trash
 """
 
-import os, re, shutil, json, time, glob
+import calendar, os, re, shutil, json, time, glob
+
+import audit  # #180: every destructive path below is logged
+import url_status  # a restored page's URL must not stay `removed`
 
 
 TRASH_DIR = '.kb-trash'
+
+# Two batch shapes live in .kb-trash/:
+#   this module's:  YYYYMMDD_HHMMSS_mmm_<op>/ (LOCAL time) with manifest.json,
+#                   deleted/<rel> and modified/<rel>;
+#   the plugin's (before #180 moved it onto bin/kb):
+#                   YYYYMMDDTHHMMSS_kb-<verb>/ (UTC, from toISOString) holding
+#                   the vault-relative files directly, no manifest.
+# "The latest" is decided by real time across both, never by name order: on
+# the same day '_' sorts after 'T', so name order always picked a Python
+# batch over a newer plugin bundle, and the CLI skipped plugin bundles.
+_PY_BATCH_RE = re.compile(r'^(\d{8}_\d{6})_(\d{3})_')
+_JS_BUNDLE_RE = re.compile(r'^(\d{8}T\d{6})_kb-([a-z][a-z-]*)$')
+
+
+def _batch_epoch(name):
+    """Seconds since the epoch the batch was made, or None if the name is
+    neither shape."""
+    m = _PY_BATCH_RE.match(name)
+    if m:
+        try:
+            return time.mktime(time.strptime(m.group(1), '%Y%m%d_%H%M%S')) + int(m.group(2)) / 1000
+        except (ValueError, OverflowError):
+            return None
+    m = _JS_BUNDLE_RE.match(name)
+    if m:
+        try:
+            return calendar.timegm(time.strptime(m.group(1), '%Y%m%dT%H%M%S'))
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def _plugin_manifest(name, path):
+    """A manifest-shaped view of a plugin bundle (it has none on disk)."""
+    m = _JS_BUNDLE_RE.match(name)
+    files = []
+    for dirpath, _dirs, fnames in os.walk(path):
+        for fn in fnames:
+            files.append(os.path.relpath(os.path.join(dirpath, fn), path))
+    return {
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(_batch_epoch(name))),
+        'operation': m.group(2),
+        'description': f"plugin kb-{m.group(2)} (no manifest)",
+        'deleted': sorted(files), 'modified': [], 'created': [],
+        'status': 'complete', 'plugin_bundle': True,
+    }
+
+
+def _ordered_batches(trash_root):
+    """[(name, path)] of both shapes, oldest first by real time."""
+    out = []
+    for path in glob.glob(os.path.join(trash_root, '*')):
+        name = os.path.basename(path)
+        epoch = _batch_epoch(name)
+        if os.path.isdir(path) and epoch is not None:
+            out.append((epoch, name, path))
+    return [(n, p) for _e, n, p in sorted(out)]
 
 
 def _validate_path(kb_root, rel_path):
@@ -41,7 +101,8 @@ def _batch_path(kb_root, operation):
     return batch
 
 
-def snapshot_files(kb_root, files_to_delete, files_to_modify, operation="remove", description=""):
+def snapshot_files(kb_root, files_to_delete, files_to_modify, operation="remove", description="",
+                   reason=None):
     """Full-state snapshot: move deleted files to trash, copy modified files for undo.
 
     This is the primary function for destructive commands. It:
@@ -55,6 +116,8 @@ def snapshot_files(kb_root, files_to_delete, files_to_modify, operation="remove"
         files_to_modify: list of absolute paths that will be edited (copied for undo)
         operation: command name
         description: what happened
+        reason: why it was allowed, for the audit log ("user-confirmed",
+            "--yes", ...); None = the caller has no prompt to report
     Returns:
         batch_path
     """
@@ -106,6 +169,10 @@ def snapshot_files(kb_root, files_to_delete, files_to_modify, operation="remove"
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=2)
 
+    audit.record(kb_root, f"kb {operation}", description or operation, "allow", reason,
+                 default_reason="no prompt (command ran as invoked)",
+                 files=len(manifest['deleted']) + len(manifest['modified']),
+                 batch=os.path.relpath(batch, kb_root))
     return batch
 
 
@@ -123,13 +190,13 @@ def mark_created(kb_root, batch_path, filepath):
         json.dump(manifest, f, indent=2)
 
 
-def trash_files(kb_root, files, operation="remove", description=""):
+def trash_files(kb_root, files, operation="remove", description="", reason=None):
     """Simple trash: move files without tracking modified files. For backward compat."""
     return snapshot_files(kb_root, files_to_delete=files, files_to_modify=[],
-                         operation=operation, description=description)
+                         operation=operation, description=description, reason=reason)
 
 
-def restore_last(kb_root):
+def restore_last(kb_root, reason=None):
     """Restore the most recent trash batch. Returns (success, message)."""
     trash_root = os.path.join(kb_root, TRASH_DIR)
     if not os.path.exists(trash_root):
@@ -140,10 +207,8 @@ def restore_last(kb_root):
     # A stray `.kb-trash/wiki/` (or any non-batch directory created by an
     # ingest mishap) would otherwise sort lexicographically last and
     # poison every undo with "No manifest in wiki".
-    _BATCH_DIR_RE = re.compile(r'^\d{8}_\d{6}_\d{3}_')
-    batches = sorted(glob.glob(os.path.join(trash_root, '*')))
-    batches = [b for b in batches if os.path.isdir(b)
-               and _BATCH_DIR_RE.match(os.path.basename(b))]
+    # Both shapes, ordered by real time (see _ordered_batches).
+    batches = [p for _n, p in _ordered_batches(trash_root)]
     if not batches:
         return False, "Trash is empty. Nothing to undo."
 
@@ -154,6 +219,8 @@ def restore_last(kb_root):
     manifest = None
     skipped = []
     for candidate in reversed(batches):
+        if _JS_BUNDLE_RE.match(os.path.basename(candidate)):
+            return _restore_plugin_bundle(kb_root, candidate, reason)
         manifest_path = os.path.join(candidate, 'manifest.json')
         if not os.path.exists(manifest_path):
             skipped.append(os.path.basename(candidate))
@@ -188,6 +255,11 @@ def restore_last(kb_root):
         if os.path.exists(src):
             if os.path.exists(dest):
                 conflicts.append(f"{rel} (exists — overwritten)")
+                # A directory (a raw's asset dir) recreated since, e.g. by a
+                # re-capture: replace it as a file is replaced. shutil.move
+                # into an existing dir would nest the restored one inside.
+                if os.path.isdir(src) and os.path.isdir(dest) and not os.path.islink(dest):
+                    shutil.rmtree(dest)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.move(src, dest)
             restored += 1
@@ -198,7 +270,10 @@ def restore_last(kb_root):
         if not _validate_path(kb_root, rel):
             continue
         dest = os.path.join(kb_root, rel)
-        if os.path.exists(dest):
+        if os.path.isdir(dest) and not os.path.islink(dest):
+            shutil.rmtree(dest)  # a created asset dir (lint #39 rename)
+            created_deleted += 1
+        elif os.path.exists(dest):
             os.remove(dest)
             created_deleted += 1
 
@@ -222,11 +297,53 @@ def restore_last(kb_root):
     msg = f"Restored {restored} deleted + {modified_restored} modified files from: {desc} ({ts})"
     if conflicts:
         msg += f"\nNotes: {'; '.join(conflicts)}"
+    url_status.revive_removed(kb_root, only=list(manifest.get('deleted', manifest.get('files', []))))
+    audit.record(kb_root, "kb undo", f"restored {desc} ({ts})", "allow", reason,
+                 files=restored + modified_restored, batch=os.path.relpath(batch, kb_root))
+    return True, msg
+
+
+def _restore_plugin_bundle(kb_root, bundle, reason):
+    """Undo a plugin-shape bundle: every file goes back to the same
+    vault-relative path, as the plugin's own undo did."""
+    name = os.path.basename(bundle)
+    restored, conflicts, rels = 0, [], []
+    for dirpath, _dirs, fnames in os.walk(bundle):
+        for fn in fnames:
+            src = os.path.join(dirpath, fn)
+            rel = os.path.relpath(src, bundle)
+            if not _validate_path(kb_root, rel):
+                conflicts.append(f"{rel} (path escapes KB root — skipped)")
+                continue
+            dest = os.path.join(kb_root, rel)
+            if os.path.exists(dest):
+                conflicts.append(f"{rel} (exists — overwritten)")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(src, dest)
+            restored += 1
+            rels.append(rel)
+    url_status.revive_removed(kb_root, only=rels)
+    if any(c.endswith("skipped") for c in conflicts):
+        msg = f"Restored {restored} files from {name}; left the rest in trash"
+    else:
+        shutil.rmtree(bundle)
+        msg = f"Restored {restored} deleted + 0 modified files from: plugin {name}"
+    if conflicts:
+        msg += f"\nNotes: {'; '.join(conflicts)}"
+    audit.record(kb_root, "kb undo", f"restored plugin bundle {name}", "allow", reason,
+                 files=restored, batch=os.path.relpath(bundle, kb_root))
     return True, msg
 
 
 def purge_old(kb_root, days=30):
     """Delete trash batches older than N days. Returns count purged."""
+    purged = _purge_old(kb_root, days)
+    audit.record(kb_root, "kb purge", f"{purged} batch(es) older than {days} days", "allow", None,
+                 files=purged)
+    return purged
+
+
+def _purge_old(kb_root, days):
     trash_root = os.path.join(kb_root, TRASH_DIR)
     if not os.path.exists(trash_root):
         return 0
@@ -236,6 +353,11 @@ def purge_old(kb_root, days=30):
 
     for batch in sorted(glob.glob(os.path.join(trash_root, '*'))):
         if not os.path.isdir(batch):
+            continue
+        if _JS_BUNDLE_RE.match(os.path.basename(batch)):  # no manifest: aged by its name
+            if _batch_epoch(os.path.basename(batch)) < cutoff:
+                shutil.rmtree(batch)
+                purged += 1
             continue
         manifest_path = os.path.join(batch, 'manifest.json')
         if os.path.exists(manifest_path):
@@ -261,8 +383,9 @@ def list_trash(kb_root):
         return []
 
     results = []
-    for batch in sorted(glob.glob(os.path.join(trash_root, '*'))):
-        if not os.path.isdir(batch):
+    for name, batch in _ordered_batches(trash_root):
+        if _JS_BUNDLE_RE.match(name):
+            results.append((name, _plugin_manifest(name, batch)))
             continue
         manifest_path = os.path.join(batch, 'manifest.json')
         if os.path.exists(manifest_path):

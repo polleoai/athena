@@ -153,12 +153,29 @@ def _reconstruct_mangled_arxiv_id(part1: str, part2: str) -> str | None:
     return None
 
 
-def extract_canonical_urls(text: str) -> list[str]:
+def x_author_of(raw_text: str) -> str | None:
+    """The X handle of a raw's own `source:` status URL, or None."""
+    m = re.search(r'^source:\s*"?' + _X_STATUS_RE.pattern, raw_text,
+                  re.MULTILINE | re.IGNORECASE)
+    if not m or m.group(1).lower() == 'i':
+        return None
+    return m.group(1)
+
+
+def extract_canonical_urls(text: str, exclude_author: str | None = None) -> list[str]:
     """Return canonical-source URLs found in the text, deduplicated.
 
     Order is the order of first occurrence; arXiv URLs come first so the
     auto-queue prioritizes the highest-value source.
+
+    exclude_author: an X handle whose own status URLs are dropped. A post's
+    links to its author's other posts are the same thread (replies, the post
+    being replied to), not a new source: queueing them re-captured an
+    author's follow-up replies as duplicate pages right after `kb merge`
+    folded them into the original (JD Pruett, 2026-11-22). Another author's
+    post (the Atai→Saboo link-share case) is still a source.
     """
+    _skip_handle = (exclude_author or "").lower()
     urls: list[str] = []
     seen: set[str] = set()
 
@@ -204,6 +221,8 @@ def extract_canonical_urls(text: str) -> list[str]:
         handle = m.group(1)
         if handle.lower() == 'i':
             continue  # reserved x.com path, not a user handle
+        if _skip_handle and handle.lower() == _skip_handle:
+            continue  # the author's own thread, not a new source
         _add(f"https://x.com/{handle}/status/{m.group(2)}")
     for m in _SUBSTACK_RE.finditer(text):
         _add(m.group(0))
@@ -253,10 +272,17 @@ def queue_canonical_urls(
         except (IOError, UnicodeDecodeError):
             pass
 
+    # Every URL arriving here was found INSIDE captured content (iframe embeds,
+    # canonical links, destination tweets, lint re-queue). Never queue one that
+    # points at the local machine or a private network (#242, SSRF).
+    from url_safety import is_internal_url
+
     queued: list[str] = []
     with open(inbox, 'a', encoding='utf-8') as f:
         for url in canonical_urls:
             if url == source_url:
+                continue
+            if is_internal_url(url):
                 continue
             if url in existing:
                 continue
@@ -335,7 +361,7 @@ def extract_via_vision(image_paths: list[Path]) -> list[str]:
             [
                 'claude', '-p',
                 '--disable-slash-commands',
-                '--model', 'claude-haiku-4-5',  # Vision-capable, cheap
+                '--model', 'haiku',  # Vision-capable, cheap; the CLI's alias tracks the current Haiku (was claude-haiku-4-5, retired in Gryphon 2.13.0)
                 f'<image>{first}</image>\n\n{_VISION_PROMPT}',
             ],
             capture_output=True, text=True, timeout=60,

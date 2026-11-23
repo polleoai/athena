@@ -259,6 +259,17 @@ def write_raw(
     # write is redirected to a free path, there is no existing file for those
     # guards to reason about. They stay for the same-URL case, where a
     # re-capture legitimately overwrites in place.
+    # Same-source twin guard (2026-11-22). A NEW path for a source that an
+    # existing raw of this category already records means a second capture
+    # path (or a changed slug scheme, or a race) is about to write a twin:
+    # write to the existing raw instead. 5 arXiv papers had twins this way.
+    if canonical_url and not out.exists():
+        twin_of = _existing_same_source(artifacts, canonical_url)
+        if twin_of is not None:
+            import sys as _sys
+            print(f"  note: {canonical_url} is already captured as {twin_of.name}; "
+                  f"writing there, not a second copy", file=_sys.stderr)
+            out = twin_of
     out = _resolve_distinct_source(out, canonical_url)
 
     # Thin-overwrite guard. Refuse to clobber an existing larger raw with
@@ -396,6 +407,50 @@ def _recorded_source(path: Path) -> str:
     return m.group(1).strip() if m else ""
 
 
+_MERGED_RE = re.compile(r"^merged_into:", re.M)
+
+
+def _canon(url: str) -> str:
+    try:
+        return canonicalize(url).url
+    except Exception:  # noqa: BLE001 — an odd recorded URL just doesn't match
+        return (url or "").strip()
+
+
+def _existing_same_source(artifacts: Path, canonical_url: str) -> Path | None:
+    """The raw in `artifacts` that records `canonical_url` as its source
+    (compared canonically); else None. An unmerged raw is preferred; if
+    every one is marked merged_into (kb merge marks all of a merged page's
+    raws, e.g. the AARM group), the first merged one, which still beats
+    writing a new twin. Ties go to the first name (sorted), deterministically."""
+    if not artifacts.is_dir():
+        return None
+    merged_hit = None
+    for f in sorted(artifacts.glob("*.md")):
+        rec = _recorded_source(f)
+        if not rec or _canon(rec) != canonical_url:
+            continue
+        try:
+            head = f.read_text(encoding="utf-8", errors="replace")[:2048]
+        except OSError:
+            continue
+        fm = head.split("\n---", 1)[0]
+        if _MERGED_RE.search(fm):
+            merged_hit = merged_hit or f
+            continue
+        return f
+    return merged_hit
+
+
+def existing_raw_for(vault_root: str | Path, source_type: str, url: str) -> Path | None:
+    """The existing raw for this source, if any (used by capture's
+    "already exists" checks, so a changed slug scheme can't hide it)."""
+    cat_dir = _CATEGORY_DIR.get(source_type)
+    if not cat_dir or not url:
+        return None
+    return _existing_same_source(Path(vault_root) / "raw" / cat_dir / "artifacts", _canon(url))
+
+
 def _resolve_distinct_source(out: Path, url: str) -> Path:
     """`out` if it is free or already belongs to `url`; else the next free
     `<stem>-N` sibling.
@@ -408,13 +463,17 @@ def _resolve_distinct_source(out: Path, url: str) -> Path:
         return out
     incoming = (url or "").strip()
     existing = _recorded_source(out)
-    if not incoming or existing == incoming:
+    # Canonically: a raw that recorded /pdf/<id>v2 belongs to /abs/<id>.
+    # Comparing the raw strings sent a same-source write to <slug>-2 (a twin)
+    # whenever the existing raw had recorded a non-canonical URL (2026-11-22).
+    if not incoming or existing == incoming or (existing and _canon(existing) == _canon(incoming)):
         return out
     for n in range(2, 100):
         candidate = out.with_name(f"{out.stem}-{n}{out.suffix}")
         if not candidate.exists():
             return candidate
-        if _recorded_source(candidate) == incoming:
+        rec = _recorded_source(candidate)
+        if rec and _canon(rec) == _canon(incoming):
             return candidate
     return out
 

@@ -16,7 +16,7 @@
 // manifest.json — so it was hand-kept and stopped being kept.
 //
 // Entries are recorded at PUBLIC RELEASE time, not at bump time: auto-bump
-// cuts a athena-dev version per Gryphon release and most never ship publicly.
+// cuts a dev version per Gryphon release and most never ship publicly.
 //
 // Usage:
 //   node scripts/versions-json.js --check

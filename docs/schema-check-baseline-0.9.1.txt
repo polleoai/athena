@@ -1,6 +1,6 @@
 
 kb schema-check — Phase 1 diagnostic
-Vault: __ATHENA_VAULT__
+Vault: <vault>
 
 ============================================================
   RAW frontmatter: 360 files

@@ -4,7 +4,7 @@
 # A public Athena release must never ship a submodule pin that a fresh clone,
 # CI, or the polleoai curated release cannot resolve: .gitmodules points at
 # polleoai/gryphon, so the pinned commit MUST exist there (i.e. be RELEASED).
-# Dev iteration may pin a athena-dev/gryphon-dev commit; this is the safety net
+# Dev iteration may pin a Gryphon dev-repo commit; this is the safety net
 # for the manual curated release. Run it before cutting.
 #
 # Reads the pin from the PARENT repo's gitlink, never from inside the

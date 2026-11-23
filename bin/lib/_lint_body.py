@@ -1243,6 +1243,11 @@ for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.m
         continue
     if not re.search(r'^clipped_via:\s*"?browser-capture"?\s*$', head, re.MULTILINE):
         continue
+    # A long X post whose full text syndication no longer serves is captured
+    # by the browser on purpose (src/athena/tweet-capture.js): that's the
+    # fuller copy, not a degraded one.
+    if re.search(r'^capture_route:\s*"?x-long-post-browser"?\s*$', head, re.MULTILINE):
+        continue
     if re.search(r'^source:\s*"?https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/',
                  head, re.MULTILINE):
         browser_captured_tweets.append(
@@ -1251,6 +1256,94 @@ for rf in sorted(glob.glob(os.path.join(KB, 'raw', 'webpages', 'artifacts', '*.m
 if browser_captured_tweets:
     check("X/Twitter posts captured via DOM walker (re-capture for full content)",
           browser_captured_tweets)
+
+# Raws a capture path marked incomplete: today, long X posts whose full text
+# the syndication CDN no longer serves, so only the ~280-char preview was
+# saved (fetch_tweet.long_text_missing; witnessed techNmak/status/
+# 2122711743369785617, 2026-11-17, the copy stopping at "2/ Brendan").
+# Surface-only: re-capture is a network op, and raw/ is never rewritten by
+# lint. Gated on a non-empty result (oracle parity, as above).
+incomplete_captures = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', '*', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            head = fh.read(2000)
+    except (IOError, UnicodeDecodeError):
+        continue
+    fm = re.match(r'^---\n(.*?)\n---', head, re.DOTALL)
+    if not fm:
+        continue
+    m = re.search(r'^capture_incomplete:\s*"?([^"\n]*)"?\s*$', fm.group(1), re.MULTILINE)
+    if m:
+        incomplete_captures.append(
+            f"{os.path.relpath(rf, KB)}: {m.group(1).strip() or 'incomplete'} — paste the full "
+            f"text with `kb add` (or re-capture once a fuller route works)")
+if incomplete_captures:
+    check("Captures marked incomplete (only part of the source was saved)",
+          incomplete_captures)
+
+# Raws captured through a fallback after arcus failed (oembed text, a
+# title-only placeholder, the abstract only, inline yt-dlp). capture.py tags
+# them `extracted_via_fallback:` with arcus's reason. Witnessed 2026-11-22:
+# with no Playwright Chromium on the Max, every arcus browser capture had
+# fallen back silently for about two months. Surface-only (re-capture is a
+# network op). Gated on a non-empty result (oracle parity, as above).
+fallback_captures = []
+for rf in sorted(glob.glob(os.path.join(KB, 'raw', '*', 'artifacts', '*.md'))):
+    try:
+        with open(rf, 'r', encoding='utf-8') as fh:
+            head = fh.read(3000)
+    except (IOError, UnicodeDecodeError):
+        continue
+    fm = re.match(r'^---\n(.*?)\n---', head, re.DOTALL)
+    if not fm:
+        continue
+    m = re.search(r'^extracted_via_fallback:\s*"?([^"\n]*)"?\s*$', fm.group(1), re.MULTILINE)
+    if m:
+        fallback_captures.append(
+            f"{os.path.relpath(rf, KB)}: {m.group(1).strip() or 'fallback'} — re-capture "
+            f"once arcus works (`kb refresh-wiki` after a fresh `kb add`)")
+if fallback_captures:
+    check("Captures made through a fallback after arcus failed (re-capture for the full source)",
+          fallback_captures)
+
+# The same source captured into two raws of one category, neither merged
+# into the other. Witnessed 2026-11-22: 5 arXiv papers each had a raw that
+# backed the wiki page and a page-less twin with the same source URL (a slug
+# scheme change between captures, or the plugin and the CLI racing).
+# raw_writer now routes such writes to the existing raw; this lists what is
+# left. Fix with `kb merge-raw <twin> --into "<page>"`. Surface-only; gated.
+twin_raws = []
+try:
+    sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
+    from url_canonical import canonicalize as _canon_url  # type: ignore
+except Exception:
+    _canon_url = None
+if _canon_url is not None:
+    for _cat in sorted(glob.glob(os.path.join(KB, 'raw', '*', 'artifacts'))):
+        _by_src = {}
+        for rf in sorted(glob.glob(os.path.join(_cat, '*.md'))):
+            try:
+                with open(rf, 'r', encoding='utf-8') as fh:
+                    head = fh.read(2048)
+            except (IOError, UnicodeDecodeError):
+                continue
+            fm = re.match(r'^---\n(.*?)\n---', head, re.DOTALL)
+            if not fm or re.search(r'^merged_into:', fm.group(1), re.MULTILINE):
+                continue
+            sm = re.search(r'^source:\s*"?([^"\n]+)"?\s*$', fm.group(1), re.MULTILINE)
+            if not sm:
+                continue
+            try:
+                _key = _canon_url(sm.group(1).strip()).url
+            except Exception:
+                continue
+            _by_src.setdefault(_key, []).append(os.path.relpath(rf, KB))
+        for _key, _files in _by_src.items():
+            if len(_files) > 1:
+                twin_raws.append(f"{_key}: " + ", ".join(_files))
+if twin_raws:
+    check("Same source captured twice (merge with `kb merge-raw <twin> --into \"<page>\"`)", twin_raws)
 
 # Generic webpages captured via the DOM walker can land as a teaser/TOC shell
 # when the walker roots on a thin <article> wrapper. Adobe AEM "insights"
@@ -2847,7 +2940,9 @@ assets_root = Path(os.path.join(KB, 'raw', 'assets'))
 orphan_asset_dirs = []
 hotlinked_pages = []
 if assets_root.is_dir():
-    raw_pages = {Path(p).stem for p in glob.glob(os.path.join(KB, 'raw/webpages/artifacts/*.md'))}
+    # Any raw type owns raw/assets/<its stem>/: webpage images, and since
+    # arcus 0.8.0 a paper's PDF figures (2026-11-22).
+    raw_pages = {Path(p).stem for p in glob.glob(os.path.join(KB, 'raw/*/artifacts/*.md'))}
     for d in assets_root.iterdir():
         if not d.is_dir() or d.name.startswith('.'):
             continue
@@ -3743,7 +3838,7 @@ _AUTO_RENAME_PATTERNS = [
 try:
     sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
     from wiki_schema import make_slug, _url_to_slug_input  # type: ignore
-    from snapshot import snapshot_files  # type: ignore
+    from snapshot import snapshot_files, mark_created  # type: ignore
     _slug_lib_ok = True
 except Exception:
     _slug_lib_ok = False
@@ -3777,6 +3872,11 @@ if _slug_lib_ok:
             # Target already exists — would clobber. Skip and record.
             slug_skipped.append(f"{os.path.relpath(f, KB)}  (target {expected}.md already exists)")
             continue
+        if (os.path.isdir(os.path.join(KB, 'raw', 'assets', actual))
+                and os.path.exists(os.path.join(KB, 'raw', 'assets', expected))):
+            # Its images would have nowhere to go: decide before anything moves.
+            slug_skipped.append(f"{os.path.relpath(f, KB)}  (target raw/assets/{expected}/ already exists)")
+            continue
         # Find every wiki page that references the old slug or path
         old_rel = os.path.relpath(f, KB)
         old_basename = os.path.basename(f)
@@ -3789,21 +3889,39 @@ if _slug_lib_ok:
             if old_rel in wt or old_basename in wt:
                 refs_to_update.append(wf)
         _rename_batch.append((f, new_path, refs_to_update, actual, expected, old_rel))
-    # Snapshot then mutate
+    # Snapshot then mutate. The snapshot MOVES each old raw (and its asset
+    # dir) into the trash batch, so the renamed copies are written from the
+    # batch and marked created: `kb undo` then restores the old ones and
+    # removes the new. (Until 2026-11-22 this did os.rename(old, new) after
+    # the snapshot had already moved old away: the rename failed and the raw
+    # was simply gone. 3 raws were lost that way on 2026-05-09/10.)
     if _rename_batch:
         files_to_modify = []
         files_to_delete = []
-        for old, new, refs, *_rest in _rename_batch:
+        for old, new, refs, actual, *_rest in _rename_batch:
             files_to_delete.append(old)        # tracked as "deleted" since path changes
+            _adir = os.path.join(KB, 'raw', 'assets', actual)
+            if os.path.isdir(_adir) and not os.path.islink(_adir):
+                files_to_delete.append(_adir)  # images follow their raw's stem
             files_to_modify.extend(refs)
-        snapshot_files(KB, files_to_delete, files_to_modify,
-                       operation='lint-auto-rename',
-                       description='kb lint #39: auto-rename collision-bait raw slugs')
+        _batch39 = snapshot_files(KB, files_to_delete, files_to_modify,
+                                  operation='lint-auto-rename',
+                                  description='kb lint #39: auto-rename collision-bait raw slugs')
+        import shutil as _sh39
         for old, new, refs, actual, expected, old_rel in _rename_batch:
             try:
-                os.rename(old, new)
+                raw_text = Path(_batch39, 'deleted', old_rel).read_text(encoding='utf-8')
+                old_adir_rel = os.path.join('raw', 'assets', actual)
+                trashed_adir = os.path.join(_batch39, 'deleted', old_adir_rel)
+                if os.path.isdir(trashed_adir):
+                    new_adir = os.path.join(KB, 'raw', 'assets', expected)
+                    _sh39.copytree(trashed_adir, new_adir)
+                    mark_created(KB, _batch39, new_adir)
+                    raw_text = raw_text.replace(f'../../assets/{actual}/', f'../../assets/{expected}/')
+                Path(new).write_text(raw_text, encoding='utf-8')
+                mark_created(KB, _batch39, new)
             except OSError as e:
-                slug_skipped.append(f"{old_rel}  (rename failed: {e})")
+                slug_skipped.append(f"{old_rel}  (rename failed: {e}; the original is in {_batch39}, `kb undo` restores it)")
                 continue
             new_rel = os.path.relpath(new, KB)
             for ref in refs:
@@ -4055,7 +4173,7 @@ xlink_added = []
 xlink_pending_capture = []
 try:
     sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
-    from canonical_source import extract_canonical_urls  # type: ignore
+    from canonical_source import extract_canonical_urls, x_author_of  # type: ignore
     _canonical_lib_ok = True
 except Exception:
     _canonical_lib_ok = False
@@ -4084,7 +4202,9 @@ if _canonical_lib_ok:
             raw_text = Path(f).read_text(encoding='utf-8')
         except (IOError, UnicodeDecodeError):
             continue
-        canonical_urls = extract_canonical_urls(raw_text)
+        # The post's own thread (its author's replies and the post replied
+        # to) is not a new source: see canonical_source.extract_canonical_urls.
+        canonical_urls = extract_canonical_urls(raw_text, exclude_author=x_author_of(raw_text))
         if not canonical_urls:
             continue
         # Find the wiki page(s) referencing this raw
@@ -4194,6 +4314,54 @@ if xlink_pending_capture:
     check("Canonical sources queued but not yet ingested (next sync will pull them)", xlink_pending_capture)
 
 # ─────────────────────────────────────────────────────
+pass  # 45c. discovered_via naming a missing page or the page itself → remove
+# ─────────────────────────────────────────────────────
+# `discovered_via:` names the page that led to this one. When that page is
+# merged away or removed, or the stamp names the page itself, the link is
+# broken and the field claims a discovery path that no longer exists.
+# Witnessed 2026-11-22: lint 45 stamped the JD Pruett original post with
+# discovered_via → its follow-up page, and `kb merge` then folded the
+# follow-up into it. Removing the field is the fix: the provenance it
+# carried is gone with the page, and a stale one misleads the dashboard.
+dvia_removed = []
+_all_stems = {os.path.splitext(os.path.basename(f))[0]
+              for f in glob.glob(os.path.join(KB, 'wiki', '**', '*.md'), recursive=True)}
+for wf in glob.glob(os.path.join(KB, 'wiki/format/**/*.md'), recursive=True):
+    try:
+        wt = Path(wf).read_text(encoding='utf-8')
+    except (IOError, UnicodeDecodeError):
+        continue
+    if not wt.startswith('---'):
+        continue
+    fm_end = wt.find('\n---', 3)
+    if fm_end == -1:
+        continue
+    # A wikilink, or a plain page name (the broken-wikilink fix demotes
+    # `[[Missing]]` to `"Missing"`). A URL value is a capture's discovery
+    # URL, not a page: left alone.
+    m = re.search(r'^discovered_via:[ \t]*(.*)\n', wt[:fm_end + 1], re.MULTILINE)
+    if not m:
+        continue
+    val = m.group(1).strip().strip('"').strip("'").strip()
+    if not val or re.match(r'https?://', val):
+        continue
+    lm = re.match(r'\[\[([^\]|#]+)[^\]]*\]\]$', val)
+    stem = os.path.splitext(os.path.basename(wf))[0]
+    target = (lm.group(1) if lm else val).strip()
+    if target in _all_stems and target != stem:
+        continue
+    why = "names itself" if target == stem else f"[[{target}]] does not exist"
+    try:
+        Path(wf).write_text(wt[:m.start()] + wt[m.end():], encoding='utf-8')
+        dvia_removed.append(f"{stem}: discovered_via {why}")
+    except OSError:
+        pass
+# Gated on a non-empty result so total_checks stays byte-identical to the frozen
+# Bash oracle (which has no such check) on vaults with no broken discovered_via.
+if dvia_removed:
+    check("Broken discovered_via removed (missing or self target)", dvia_removed, fixed=True)
+
+# ─────────────────────────────────────────────────────
 pass  # 45b. Embedded-iframe sources recorded but not captured (re-queue)
 # ─────────────────────────────────────────────────────
 # embed_discovery (at ingest) records container→embed <iframe> mappings in
@@ -4203,7 +4371,8 @@ pass  # 45b. Embedded-iframe sources recorded but not captured (re-queue)
 # embed got ingested, or the embed was discovered before this feature existed
 # and only the mapping survived. Reads local state only; queue_canonical_urls
 # dedups against url-new.txt + url-resolved.tsv, so it's idempotent.
-total_checks += 1
+# Counted by check() below, only when it finds something (oracle parity,
+# #239): a bare total_checks += 1 here counted it twice, or once when clean.
 embed_requeued = []
 _embed_tsv = os.path.join(KB, 'inbox', 'embed-sources.tsv')
 if os.path.exists(_embed_tsv):
@@ -4907,8 +5076,24 @@ for _base, _dirs, _files in os.walk(os.path.join(KB, 'raw')):
             _identityless.append(
                 f"{os.path.relpath(_p, KB)} → source: {_m.group(1).strip()} "
                 f"(no post identity; re-capture from the post's own permalink)")
-check("Raw sources recorded under a site/feed root with no post identity",
-      _identityless)
+# Gated on a non-empty result (oracle parity, #239), like every Python-only check.
+if _identityless:
+    check("Raw sources recorded under a site/feed root with no post identity",
+          _identityless)
+
+# ─────────────────────────────────────────────────────
+pass  # 52. URL left `removed` while its wiki page exists (kb undo, pre-fix)
+# ─────────────────────────────────────────────────────
+# `kb remove` appends a `removed` row; `kb undo` restored the page but left
+# that row as the URL's latest status, so stats and the URL Tracker called a
+# live page removed. undo now appends `captured` itself (url_status); this
+# auto-fixes the rows earlier undos left behind. Gated on a non-empty result
+# (oracle parity, #239), like every Python-only check.
+import url_status as _url_status
+_revived_urls = _url_status.revive_removed(KB)
+if _revived_urls:
+    check("URL marked removed in url-resolved.tsv but the page exists (restored by kb undo) — marked captured",
+          _revived_urls, fixed=True)
 
 # ═══════════════════════════════════════════════════
 # SUMMARY

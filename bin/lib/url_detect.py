@@ -91,7 +91,8 @@ def detect_type(url: str, timeout: int = 10) -> dict:
             url, method='HEAD',
             headers={'User-Agent': 'Athena/1.0 (content detector)'},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        from url_safety import safe_urlopen  # #243: redirects + DNS checked
+        with safe_urlopen(req, timeout=timeout) as resp:
             mime = (resp.headers.get('Content-Type') or '').split(';')[0].strip().lower()
             disp = resp.headers.get('Content-Disposition') or ''
             if mime:

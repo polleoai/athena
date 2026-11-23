@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import List
 
-# Verbatim from bin/kb-legacy's help arm (lines 8850-8897). Kept as one literal
+# Started verbatim from bin/kb-legacy's help arm (lines 8850-8897); since
+# then kb bases / canvas / doctor were added (tests/test_kb_parity.py names
+# them in HELP_ADDED_SINCE_LEGACY). Kept as one literal
 # so a diff against the Bash echoes is a straight line-for-line comparison.
 _HELP = """\
 kb — Athena: Your Second Brain
@@ -26,6 +28,9 @@ Commands:
   kb batch                  Process all URLs in inbox/url-new.txt
   kb rename <page> --to      Rename a page and update all references
   kb refresh-wiki <page>     Re-process raw → rewrite wiki body (snapshot to trash)
+  kb backfill-figures        Add PDF figures to existing paper raws in place (--dry-run first)
+  kb merge-raw <raw> --into  Fold a page-less twin raw into the page with the same source
+  kb backfill-fulltext       Restore paper text cut at 50,000 chars (grow-only, --dry-run first)
   kb bases                   Generate Obsidian Bases over typed collections (wiki/bases/)
   kb canvas <topic>          Render a topic's related: graph as a 1-hop Obsidian Canvas
   kb delete <page>           Trash a page AND its raw source (recoverable via kb undo)
@@ -38,6 +43,8 @@ Commands:
   kb undo                   Restore last trashed files
   kb trash                  List items in trash
   kb purge                  Permanently delete trash older than 30 days
+  kb audit tail [N]         Last N entries of the destructive-operation audit log
+  kb audit grep <text>      Search the audit log (remove, merge, undo, purge, ...)
   kb journal "text"           Write a learning journal entry
   kb insight "Title"          Save a polished finding as a wiki page
   kb reflect                  AI proposes insights from journal patterns

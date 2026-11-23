@@ -4,12 +4,12 @@
   com.athena.sync — hourly local-installation sync for Athena.
 
   Runs `npm run sync` from the Athena vault every hour. That command:
-    1. git-pulls athena-dev/athena main (fast-forward only, and only when main is checked out)
+    1. git-pulls the dev repo's main (fast-forward only, and only when main is checked out)
     2. updates vendor/gryphon submodule to recorded pin
     3. rebuilds Gryphon's plugin bundle + Athena's plugin bundle
 
   After the next reload of Athena in Obsidian, the running plugin
-  reflects whatever's currently on athena-dev/athena main — including
+  reflects whatever's currently on the dev repo's main — including
   any auto-bumped Gryphon submodule version.
 
   Install (one-time):

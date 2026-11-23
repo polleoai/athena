@@ -25,6 +25,9 @@ import cmd_add_content
 import cmd_analyze
 import cmd_attach
 import cmd_backfill_assets
+import cmd_backfill_figures
+import cmd_backfill_fulltext
+import cmd_merge_raw
 import cmd_bases
 import cmd_batch
 import cmd_canvas
@@ -59,6 +62,7 @@ import cmd_search
 import cmd_see_also
 import cmd_topics
 import cmd_trash
+import cmd_audit
 import cmd_undo
 import cmd_ungroup
 
@@ -172,6 +176,7 @@ PORTED: Dict[str, Handler] = {
     "search": cmd_search.handle,
     "query": cmd_query.handle,
     "trash": cmd_trash.handle,
+    "audit": cmd_audit.handle,
     "index": cmd_index.handle,
     "doctor": cmd_doctor.handle,
     "lint": cmd_lint.handle,
@@ -207,6 +212,9 @@ PORTED: Dict[str, Handler] = {
     "batch": cmd_batch.handle,
     "capture-deep": cmd_capture_deep.handle,
     "backfill-assets": cmd_backfill_assets.handle,
+    "backfill-figures": cmd_backfill_figures.handle,
+    "backfill-fulltext": cmd_backfill_fulltext.handle,
+    "merge-raw": cmd_merge_raw.handle,
     "retry-assets": cmd_retry_assets.handle,
     "request-feature": cmd_request_feature.handle,
     "feature": cmd_request_feature.handle,

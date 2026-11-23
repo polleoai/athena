@@ -23,24 +23,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
-# Mirrors COLD_START_BUDGET_MS in vendor/gryphon/src/constants.js.
-# Keys cover both the Gryphon model aliases (used by the Obsidian dropdown)
-# and the resolved model-id strings the Athena scripts pass directly to
-# `claude -p --model`. Keep both forms in sync if Gryphon's table changes.
-_MODEL_TIMEOUTS_S: dict[str, int] = {
-    "haiku": 30,
-    "sonnet": 60,
-    "opus": 120,
-    "opus[1m]": 180,
-    "claude-opus-4-7": 120,
-    "claude-opus-4-7[1m]": 180,
-    "claude-sonnet-4-6": 60,
-    "claude-haiku-4-5-20251001": 30,
-}
+# Model-adaptive budgets come from Gryphon's registry (coldStartMsFor) via
+# _athena_models (#182). This file used to mirror Gryphon's table by hand,
+# and its ids (claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5-…) went
+# stale when Gryphon 2.13.0 retired them.
 _DEFAULT_TIMEOUT_S = 60
 _MIN_TIMEOUT_S = 5
 _MAX_TIMEOUT_S = 600
@@ -85,7 +76,20 @@ def resolve_timeout_seconds(model: str, vault: Path | None = None) -> int:
         # Missing / corrupt data.json shouldn't break a long batch run.
         # Fall through to the model-adaptive default.
         pass
-    return _MODEL_TIMEOUTS_S.get(model, _DEFAULT_TIMEOUT_S)
+    try:
+        from _athena_models import cold_start_seconds, RegistryUnavailable
+    except ImportError:  # a caller that put only this file on sys.path
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _athena_models import cold_start_seconds, RegistryUnavailable
+    try:
+        budget = cold_start_seconds(model)
+    except (RegistryUnavailable, ValueError) as e:
+        print(f"_athena_timeout: {e}; using the {_DEFAULT_TIMEOUT_S}s default for {model!r}",
+              file=sys.stderr)
+        return _DEFAULT_TIMEOUT_S
+    if budget is None:
+        return _DEFAULT_TIMEOUT_S
+    return max(_MIN_TIMEOUT_S, min(_MAX_TIMEOUT_S, budget))
 
 
 def run_claude_with_idle_timeout(
@@ -203,3 +207,84 @@ def extract_text_from_stream_json(raw_stdout: str) -> str:
     if final_result is not None:
         return final_result
     return "".join(text_deltas)
+
+
+def extract_result_event(raw_stdout: str) -> dict | None:
+    """The last `result` event of a `claude -p` stream-json transcript, or
+    None. It carries subtype ("success", "error_max_budget_usd", ...) and
+    total_cost_usd (witnessed with Claude Code 2.1.326, 2026-11-19)."""
+    found: dict | None = None
+    for line in raw_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            found = ev
+    return found
+
+
+def extract_structured_output(raw_stdout: str) -> dict | None:
+    """The schema-validated object from a `claude -p --json-schema …`
+    stream-json transcript, or None.
+
+    With --json-schema the terminal `result` event carries the validated
+    object in `structured_output` (witnessed with Claude Code 2.1.326,
+    2026-11-19), beside the same JSON as text in `result`. None when the
+    event or the field is missing, or isn't an object: the caller then
+    parses the text (#181's soft landing).
+    """
+    found: dict | None = None
+    for line in raw_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            so = ev.get("structured_output")
+            found = so if isinstance(so, dict) else None
+    return found
+
+
+# #179: a cost ceiling for the bulk sweeps (bulk-llm-regen-summaries.py,
+# bulk-llm-regen-tags.py). Each call passes what is left as its own
+# --max-budget-usd and is charged its total_cost_usd.
+DEFAULT_MAX_USD = 10.0
+
+
+class BudgetExceeded(Exception):
+    """The sweep's --max-usd is spent, or a call's cost couldn't be read.
+    Not a RuntimeError: the retry loop must not swallow it."""
+
+
+class Budget:
+    def __init__(self, cap: float):
+        if not cap > 0:
+            raise ValueError(f"--max-usd must be > 0, got {cap}")
+        self.cap, self.spent = float(cap), 0.0
+
+    def remaining(self) -> float:
+        return self.cap - self.spent
+
+    def check(self) -> None:
+        if self.remaining() <= 0:
+            raise BudgetExceeded(f"spent ${self.spent:.4f} of the ${self.cap:.2f} cap")
+
+    def charge(self, raw_out: str) -> dict:
+        """Add the call's total_cost_usd; return its result event."""
+        ev = extract_result_event(raw_out) or {}
+        cost = ev.get("total_cost_usd")
+        if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+            raise BudgetExceeded(f"the call's cost is unreadable ({cost!r}), so the cap can't be "
+                                 f"enforced; spent ${self.spent:.4f} before it")
+        self.spent += cost
+        if ev.get("subtype") == "error_max_budget_usd":
+            raise BudgetExceeded(f"the CLI stopped at its budget; spent ${self.spent:.4f} "
+                                 f"of the ${self.cap:.2f} cap")
+        return ev

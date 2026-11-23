@@ -204,6 +204,13 @@ def ingest(input: IngestInput) -> IngestResult:
     # 1. Canonicalize the URL once, here. Handlers receive the canonical
     #    form — no handler should canonicalize separately.
     from url_canonical import canonicalize, identity_loss_refusal
+    from url_safety import internal_url_reason
+
+    # Never fetch the local machine or a private network (#242, SSRF). Checked
+    # before route(), which may already send a HEAD request.
+    _internal = internal_url_reason(input.url)
+    if _internal:
+        raise UnifiedIngestError(f"refusing to fetch {input.url!r}: {_internal}")
 
     # A URL whose identity did not survive canonicalization names a VIEW, not
     # an item. This path fetches from the URL, so accepting it would capture

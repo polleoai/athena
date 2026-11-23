@@ -80,7 +80,8 @@ class ArcusFileError(Exception):
     """Raised when arcus file extraction fails for a recoverable reason."""
 
 
-def _extract_via_arcus(local_path: Path, ext: str) -> dict[str, str]:
+def _extract_via_arcus(local_path: Path, ext: str, *, vault: Path | None = None,
+                       asset_slug: str | None = None) -> dict[str, Any]:
     """Run the local file through arcus (PdfProvider for pdf, DocsProvider
     for docx/xlsx/pptx/epub) and return {title, authors, text}.
 
@@ -99,6 +100,14 @@ def _extract_via_arcus(local_path: Path, ext: str) -> dict[str, str]:
         raise ArcusFileError(
             f"arcus-provider-runtime not installed: {e}"
         ) from e
+
+    # A local file, but arcus may still fetch (a document's remote parts):
+    # the same policy as every other arcus call.
+    from url_safety import install_arcus_guard
+    try:
+        install_arcus_guard()
+    except ImportError as e:
+        raise ArcusFileError(str(e)) from e
 
     registry = ProviderRegistry()
     register_defaults(registry)
@@ -120,9 +129,10 @@ def _extract_via_arcus(local_path: Path, ext: str) -> dict[str, str]:
         with _silence_fds():
             exit_code = factory.run(str(local_path), out_dir=out_dir, force=False)
         if exit_code != EXIT_CODES["SUCCESS"]:
-            raise ArcusFileError(
-                f"arcus extraction failed (exit {exit_code}) for {local_path}"
-            )
+            from arcus_errors import failure_reason, with_reason
+            raise ArcusFileError(with_reason(
+                f"arcus extraction failed (exit {exit_code}) for {local_path}",
+                failure_reason(out_dir)))
 
         # Read the .json sidecar for structured fields. arcus always writes
         # exactly one .md + .json pair per call.
@@ -131,13 +141,85 @@ def _extract_via_arcus(local_path: Path, ext: str) -> dict[str, str]:
         if not json_files:
             raise ArcusFileError(f"arcus produced no .json sidecar in {out_dir}")
         payload = json.loads(json_files[0].read_text(encoding="utf-8"))
+        # Figures (arcus >= 0.8.0) live in out_dir: place them before it goes.
+        kept: list[dict] = []
+        skipped: list[dict] = []
+        if vault is not None and asset_slug:
+            text, kept, skipped = _place_figures(out_dir, payload, Path(vault), asset_slug)
+        else:  # nowhere to keep them: drop the references into the temp dir
+            text = re.sub(r"!\[[^\]]*\]\([^)\s]*\.figures/[^)\s]+\)\n?", "",
+                          payload.get("text") or "")
 
     metadata = payload.get("metadata") or {}
     return {
         "title": (metadata.get("title") or "").strip(),
         "authors": (metadata.get("author") or "").strip(),
-        "text": payload.get("text") or "",
+        "text": text,
+        "figures": kept,
+        "figures_skipped": skipped,
     }
+
+
+_FIGURE_NAME = re.compile(r"^figure-\d{2,}(?:-p\d+)?\.png$")
+
+
+def _place_figures(out_dir: Path, payload: dict, vault: Path,
+                   asset_slug: str) -> tuple[str, list[dict], list[dict]]:
+    """Copy arcus's PDF figures into raw/assets/<asset_slug>/ and point the
+    text's references there. Returns (text, kept, skipped).
+
+    arcus >= 0.8.0 writes them as <slug>.figures/figure-NN-pP.png in out_dir,
+    references them in `text`, and lists them in extractor_detail. A listed
+    path that is not a figure-NN.png inside out_dir is refused (the payload
+    comes from parsing an untrusted document) and reported as skipped, and
+    its reference is dropped. An _assets.json sidecar records what was kept
+    and skipped, as asset_download does for webpage images.
+    """
+    import datetime as _dt
+    import json
+    import shutil as _shutil
+    detail = payload.get("extractor_detail") or {}
+    text = payload.get("text") or ""
+    figures = detail.get("figures") or []
+    skipped = [dict(s) for s in (detail.get("figures_skipped") or [])]
+    kept: list[dict] = []
+    if not figures:
+        return text, kept, skipped
+    root = out_dir.resolve()
+    assets_dir = Path(vault) / "raw" / "assets" / asset_slug
+    for fig in figures:
+        rel = str(fig.get("file") or "")
+        src = (out_dir / rel).resolve()
+        name = src.name
+        if (not src.is_relative_to(root) or not _FIGURE_NAME.match(name)
+                or not src.is_file()):
+            skipped.append({"page": fig.get("page"), "reason": "unsafe_path",
+                            "caption": fig.get("caption")})
+            text = re.sub(r"!\[[^\]]*\]\(" + re.escape(rel) + r"\)\n?", "", text)
+            continue
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        _shutil.copyfile(src, assets_dir / name)
+        text = text.replace(f"]({rel})", f"](../../assets/{asset_slug}/{name})")
+        kept.append({"local": name, "page": fig.get("page"), "caption": fig.get("caption"),
+                     "bytes": fig.get("bytes"), "source": "arcus pdf figure"})
+    if kept:  # no asset dir for a PDF whose figures were all skipped
+        (assets_dir / "_assets.json").write_text(json.dumps({
+            "page_slug": asset_slug,
+            "captured_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "assets": kept, "skipped": skipped, "failures": [],
+        }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return text, kept, skipped
+
+
+def figures_note(kept: list[dict], skipped: list[dict]) -> str:
+    """'N kept, M skipped (reason, ...)' or '' when the PDF had none."""
+    if not kept and not skipped:
+        return ""
+    note = f"{len(kept)} kept"
+    if skipped:
+        reasons = sorted({str(s.get("reason") or "?") for s in skipped})
+        note += f", {len(skipped)} skipped ({', '.join(reasons)})"
+    return note
 
 
 def _build_athena_body(
@@ -148,6 +230,7 @@ def _build_athena_body(
     authors: str,
     text: str,
     date_str: str,
+    figures: str = "",
 ) -> str:
     """Compose the raw .md body in the legacy format bin/ingest-file produces
     (so existing wiki pages built against this format keep parsing cleanly).
@@ -158,6 +241,7 @@ def _build_athena_body(
         f"- **{source_kind.upper()} file:** ./{downloaded_basename}",
         f"- **Clipped:** {date_str}",
         f"- **Content fetched:** yes ({'full text' if has_text else 'metadata only'}, via arcus)",
+        *([f"- **Figures:** {figures}"] if figures else []),
         "",
         "## Content",
         "",
@@ -195,7 +279,9 @@ def ingest_local_file(
     if not local_path.exists():
         raise ArcusFileError(f"local file not found: {local_path}")
 
-    extracted = _extract_via_arcus(local_path, ext)
+    # The raw .md is named after the downloaded file (slug_override below),
+    # so its figures go to raw/assets/<that stem>/.
+    extracted = _extract_via_arcus(local_path, ext, vault=vault, asset_slug=local_path.stem)
     title = extracted["title"] or title_hint or local_path.stem
     authors = extracted["authors"]
     text = extracted["text"]
@@ -209,6 +295,7 @@ def ingest_local_file(
         authors=authors,
         text=text,
         date_str=date_str,
+        figures=figures_note(extracted["figures"], extracted["figures_skipped"]),
     )
 
     extras: dict[str, Any] = {

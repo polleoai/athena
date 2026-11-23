@@ -133,7 +133,50 @@ function composeUserPrompt({
 }
 
 /**
- * Parse the model's JSON response. Tolerates the two common deviations
+ * The digest's shape, enforced by Gryphon's structured output (#181): the
+ * provider validates it vendor-side (API) or by parse + validate + retry
+ * (CLIs) and returns result.json. Gryphon 2.13.0 fixed Anthropic-API refusals
+ * of this request on Sonnet 5.5, Opus 5.5 and Fable 5.2.
+ */
+const DIGEST_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: "string", description: "One paragraph, plain prose." },
+    body: { type: "string", description: "The structured digest body, in Markdown." },
+  },
+  required: ["summary", "body"],
+  additionalProperties: false,
+};
+const DIGEST_OUTPUT = { name: "wiki_digest", schema: DIGEST_SCHEMA, maxRetries: 2 };
+
+/**
+ * Normalise a parsed digest object (from result.json, or from the text
+ * fallback below) into { ok, summary, body }.
+ */
+function digestFromObject(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, reason: "not-object" };
+  }
+  let summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+  const body = typeof parsed.body === "string" ? parsed.body.trim() : "";
+  // Collapse accidental newlines in summary — models occasionally split a
+  // long sentence across two lines even though the rules say one paragraph.
+  summary = summary.replace(/\s*\n\s*/g, " ").trim();
+  // Strip surrounding quotes if the model double-wrapped.
+  if (
+    (summary.startsWith('"') && summary.endsWith('"')) ||
+    (summary.startsWith("'") && summary.endsWith("'"))
+  ) {
+    summary = summary.slice(1, -1).trim();
+  }
+  // Strip "Summary:" preface if it slipped through.
+  summary = summary.replace(/^(Summary|SUMMARY)\s*[:\-]\s*/, "");
+  return { ok: true, summary, body };
+}
+
+/**
+ * Parse the model's JSON response from TEXT: the soft landing when
+ * structured output isn't available or gave up (#181). Tolerates the two common deviations
  * we've seen in the Python script's logs:
  *   1. Model wraps output in markdown code fences (```json ... ```)
  *   2. Model adds a preamble/postscript around the JSON object
@@ -165,27 +208,7 @@ function parseDigestResponse(text) {
     }
   }
 
-  if (!parsed || typeof parsed !== "object") {
-    return { ok: false, reason: "not-object" };
-  }
-
-  let summary = (parsed.summary || "").trim();
-  let body = (parsed.body || "").trim();
-
-  // Collapse accidental newlines in summary — models occasionally split a
-  // long sentence across two lines even though the rules say one paragraph.
-  summary = summary.replace(/\s*\n\s*/g, " ").trim();
-  // Strip surrounding quotes if the model double-wrapped.
-  if (
-    (summary.startsWith('"') && summary.endsWith('"')) ||
-    (summary.startsWith("'") && summary.endsWith("'"))
-  ) {
-    summary = summary.slice(1, -1).trim();
-  }
-  // Strip "Summary:" preface if it slipped through.
-  summary = summary.replace(/^(Summary|SUMMARY)\s*[:\-]\s*/, "");
-
-  return { ok: true, summary, body };
+  return digestFromObject(parsed);
 }
 
 /**
@@ -216,9 +239,23 @@ async function callProvider(plugin, prompt) {
   provider.onError = (text) => { stderrBuf += text + "\n"; };
 
   try {
-    const result = await provider.send(prompt);
-    return { ok: true, text: (result && result.text) || "", cost: (result && result.cost) || 0 };
+    // Schema-validated output (#181); result.json is the parsed digest.
+    const result = await provider.send(prompt, { structuredOutput: DIGEST_OUTPUT });
+    return {
+      ok: true,
+      text: (result && result.text) || "",
+      json: result && result.json !== undefined ? result.json : undefined,
+      cost: (result && result.cost) || 0,
+    };
   } catch (e) {
+    // Structured output gave up (CLI parse/validate budget spent). Log the
+    // code and the raw output, then let the text parse try the last output:
+    // the soft landing #181 asks for. Anything else is a provider failure.
+    if (e && e.name === "CliStructuredOutputError" && typeof e.lastOutput === "string" && e.lastOutput.trim()) {
+      console.warn("[athena] synthesis: structured output failed, falling back to text parse",
+        { reason: e.reason, attempts: e.attempts, lastOutput: e.lastOutput.slice(0, 500) });
+      return { ok: true, text: e.lastOutput, cost: 0, structuredFailed: e.reason || "unknown" };
+    }
     return {
       ok: false,
       reason: "provider-error",
@@ -310,7 +347,9 @@ async function synthesizeWikiPage(plugin, wikiAbsPath, options = {}) {
     }
     totalCost += llmResult.cost || 0;
 
-    const parsed = parseDigestResponse(llmResult.text);
+    const parsed = llmResult.json !== undefined
+      ? digestFromObject(llmResult.json)
+      : parseDigestResponse(llmResult.text);
     if (!parsed.ok) {
       retryReason = `output-not-valid-json (${parsed.reason})`;
       lastDetail = retryReason;
@@ -399,6 +438,8 @@ module.exports = {
   DIGEST_USER_PROMPT_PREAMBLE,
   composeUserPrompt,
   parseDigestResponse,
+  digestFromObject,
+  DIGEST_SCHEMA,
   callProvider,
   synthesizeWikiPage,
   findPendingPages,

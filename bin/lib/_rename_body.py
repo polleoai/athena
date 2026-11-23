@@ -89,16 +89,21 @@ print(f"    →   {new_name}")
 print(f"References to update: {ref_count} pages")
 print()
 
+sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
+import audit  # #180: a declined prompt is logged as deny
+reason = "--yes"
 if not confirmed:
     try:
         answer = input("Proceed? (y/N) ").strip().lower()
-        if answer != 'y':
-            print("Cancelled."); sys.exit(0)
     except (EOFError, KeyboardInterrupt):
-        print("\nCancelled."); sys.exit(0)
+        answer = ""
+        print()
+    if answer != 'y':
+        audit.record(KB, "kb rename", f'"{old_name}" --to "{new_name}"', "deny", "user-cancelled")
+        print("Cancelled."); sys.exit(0)
+    reason = "user-confirmed"
 
 # ── Snapshot for undo ────────────────────────────────
-sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
 from snapshot import snapshot_files
 
 # Find all files that reference this page (will be modified by link updates)
@@ -118,7 +123,8 @@ for f in glob.glob(os.path.join(KB, 'wiki', '**', '*.md'), recursive=True):
 # Snapshot: treat old file as "deleted" (moved to trash), other files as "modified"
 other_files = [f for f in files_to_modify if f != page_path]
 batch = snapshot_files(KB, files_to_delete=[page_path], files_to_modify=other_files,
-               operation="rename", description=f'kb rename "{old_name}" --to "{new_name}"')
+               operation="rename", description=f'kb rename "{old_name}" --to "{new_name}"',
+               reason=reason)
 
 # Write the renamed file (old file is now in trash, read content from snapshot)
 new_path = os.path.join(os.path.dirname(page_path), f'{new_name}.md')

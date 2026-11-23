@@ -162,15 +162,20 @@ Examples:
         print()
 
     # ── Confirm ──────────────────────────────────────────
+    sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
+    import audit  # #180: a declined prompt is logged as deny
+    reason = "--yes"
     if not confirmed:
         try:
             answer = input("Proceed? (y/N) ").strip().lower()
-            if answer != 'y':
-                print("Cancelled.")
-                return 0
         except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
+            answer = ""
+            print()
+        if answer != 'y':
+            audit.record(KB, "kb remove", page_name, "deny", "user-cancelled")
+            print("Cancelled.")
             return 0
+        reason = "user-confirmed"
 
     # ── Soft delete: move to trash ───────────────────────
     sys.path.insert(0, os.path.join(KB, 'bin', 'lib'))
@@ -201,7 +206,17 @@ Examples:
 
     # Trash raw sources if requested (validate paths stay within KB)
     if not keep_raw:
+        # A raw is the source of every page that lists it. After `kb merge`
+        # the loser's raw sits on the winner's raw_paths; removing a page
+        # that also lists it (a re-created duplicate, 2026-11-22) must not
+        # pull it from under the winner. Keep it and say who uses it.
+        _removing = {os.path.realpath(f) for f in files_to_trash}
+        _users = _raw_users(KB, _removing)
         for rp in raw_paths:
+            if _users.get(rp.strip().strip('"').strip("'")):
+                names = ", ".join(f"[[{n}]]" for n in sorted(_users[rp]))
+                print(f"Kept raw:   {rp}  (still used by {names})")
+                continue
             full_rp = os.path.join(KB, rp)
             real_rp = os.path.realpath(full_rp)
             if not real_rp.startswith(os.path.realpath(KB) + os.sep):
@@ -213,12 +228,20 @@ Examples:
             pdf_path = re.sub(r'\.md$', '.pdf', full_rp)
             if os.path.exists(pdf_path):
                 files_to_trash.append(pdf_path)
+            # And its local images, raw/assets/<raw stem>/ (webpage images;
+            # a paper's PDF figures since arcus 0.8.0), in the same batch so
+            # `kb undo` brings them back and lint finds no orphan dir.
+            asset_dir = os.path.join(KB, 'raw', 'assets',
+                                     os.path.splitext(os.path.basename(full_rp))[0])
+            if (os.path.isdir(asset_dir) and not os.path.islink(asset_dir)
+                    and asset_dir not in files_to_trash):
+                files_to_trash.append(asset_dir)
 
     # Move to trash FIRST, then record in ledger
     desc = f"kb remove {page_name}"
     if cascade:
         desc += f" --cascade ({len(children)} children)"
-    batch = trash_files(KB, files_to_trash, operation="remove", description=desc)
+    batch = trash_files(KB, files_to_trash, operation="remove", description=desc, reason=reason)
     print(f"Trashed {len(files_to_trash)} file(s) → .kb-trash/")
     print(f"  Use 'kb undo' to restore")
 
@@ -296,3 +319,38 @@ Examples:
     print("Done.")
     print("Run 'kb lint' to verify.")
     return 0
+
+
+def _raw_users(KB, removing):
+    """{raw rel path: {page names}} for every wiki page NOT being removed,
+    from its frontmatter raw_path / raw_paths."""
+    users = {}
+    for f in glob.glob(os.path.join(KB, 'wiki', '**', '*.md'), recursive=True):
+        if os.path.realpath(f) in removing:
+            continue
+        try:
+            with open(f, 'r', encoding='utf-8') as fh:
+                text = fh.read()
+        except (IOError, UnicodeDecodeError):
+            continue
+        fm = re.match(r'^---\s*\n(.*?)\n---', text, re.DOTALL)
+        if not fm:
+            continue
+        name = os.path.splitext(os.path.basename(f))[0]
+        in_list = False
+        for line in fm.group(1).split('\n'):
+            rm = re.match(r'^raw_path:\s*"?([^"\n]+?)"?\s*$', line)
+            if rm:
+                users.setdefault(rm.group(1).strip(), set()).add(name)
+                in_list = False
+                continue
+            if re.match(r'^raw_paths:', line):
+                in_list = True
+                continue
+            if in_list:
+                lm = re.match(r'^\s+-\s+"?([^"]+?)"?\s*$', line)
+                if lm:
+                    users.setdefault(lm.group(1).strip(), set()).add(name)
+                elif line.strip() and not line.startswith(' '):
+                    in_list = False
+    return users

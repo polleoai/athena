@@ -161,7 +161,7 @@ def _clean_linkedin_content(body):
         # Skip obvious LinkedIn junk
         if any(pat in stripped for pat in [
             'premium/redeem', 'Get 14x more', 'Try 2 months',
-            'premium_homepage', 'profile-framedphoto', '/in/janedoe',
+            'premium_homepage', 'profile-framedphoto',
             'upsellOrderOrigin', 'linkedin.com/premium',
             'Open to work', 'People also viewed', 'More from this author',
             'Sign in', 'Join now', 'linkedin.com/safety/go',

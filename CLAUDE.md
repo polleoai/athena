@@ -10,13 +10,7 @@ The full architecture reference is in `docs/athena-architecture.md`.
 
 ## Content extraction lives in arcus
 
-Per-format extraction (HTML pages incl. X.com tweets, PDFs, DOCX/XLSX/PPTX/EPUB, YouTube transcripts) is delegated to **arcus** — the published `arcus-provider-runtime` package (open-sourced at polleoai/arcus, MIT; dev source lives at `~/Projects/arcus/`). Athena imports `arcus.provider_runtime` and calls its `Factory.run(input, out_dir=...)` via three thin adapter modules: `bin/lib/arcus_html.py`, `bin/lib/arcus_file.py`, `bin/lib/arcus_video.py`. Each adapter wraps arcus's output into athena's raw .md format and writes via `raw_writer.write_raw`.
-
-**Install prerequisite:** `pip install --user "arcus-provider-runtime[html,pdf,office]"` (resolves from PyPI) plus `python3 -m playwright install chromium`. The athena `pyproject.toml` declares `arcus-provider-runtime[html,pdf,office]>=0.7.0` as a required dependency. (A local editable install — `pip install -e ~/Projects/arcus/packages/provider-runtime[...]` — is a dev-only convenience, not the end-user path.)
-
-**Athena owns** (kept in athena's bin/lib/): ingest orchestration, vault state, wiki generation, topic + entity pages, lint, search, URL routing (`bin/lib/url_detect.py`), playlist detection, paper discovery, dead-URL recording. Anything multi-source or vault-aware stays in athena.
-
-**arcus owns** (delegated): single-URL/file extraction. Given one input, return one extracted text + metadata. arcus has zero awareness of athena's vault layout, topics, or wiki — see the `feedback-arcus-pure-download-layer` memory.
+Per-format extraction (HTML incl. X.com, PDF, Office, EPUB, YouTube transcripts) is delegated to **arcus** (`arcus-provider-runtime`, via `bin/lib/arcus_html.py` / `arcus_file.py` / `arcus_video.py`). arcus extracts one input; anything multi-source or vault-aware stays in Athena. Install prerequisites and the ownership split: `docs/arcus-extraction.md`.
 
 ## Three-Layer Architecture
 
@@ -166,6 +160,8 @@ One word: **`kb`** followed by what the user wants.
 | `kb undo` | Restore the most recent trashed files |
 | `kb trash` | List items currently in trash |
 | `kb purge` | Permanently delete trash older than 30 days |
+| `kb audit tail [N]` | Last N entries of the destructive-operation audit log (`.athena/audit.jsonl`) |
+| `kb audit grep <text>` | Search the audit log |
 | `kb rules` | Show current processing rules (read-only view) |
 | `kb rules add "rule"` | Add a new processing rule |
 | `kb lint` | Health check + auto-fix |
@@ -188,7 +184,7 @@ When the LLM sees either cue, it should:
 3. **Execute** — run the command after confirmation
 
 Confirmation levels by risk:
-- **Read-only** (search, query, list, stats): execute immediately, no confirmation needed
+- **Read-only** (search, query, list, stats, audit): execute immediately, no confirmation needed
 - **Safe writes** (add, journal, lint, index, reflect): execute immediately, no confirmation needed
 - **Modifying** (create, rename, move, merge, insight): show the command, confirm before executing
 - **Destructive** (remove, purge, ungroup): show what will happen, ask "Proceed?" — never auto-execute
@@ -199,31 +195,13 @@ Both cue words are equivalent in capability. The user does not need to know the 
 
 When locating an existing wiki page — for cross-references, dedup checks, "does X already exist?", or any "find the page about Y" task — **always use `kb search <query>` or `kb list --<type>` first**. Athena has a pre-built search index that returns ranked matches in under 100 ms.
 
-**Do NOT** enumerate `wiki/` via the Obsidian REST API (`localhost:27124/vault/wiki/...`) or via filesystem globs. That's a 500× cost multiplier — a single "find IronCurtain" lookup that should take 50 ms via `kb search` becomes hundreds of HTTP GETs that walk every wiki file. Witnessed 2026-05-19: a panel LLM enumerated ~500 wiki files via REST to locate one page; `kb search ironcurtain` would have returned it in one call.
-
-Search-first applies even when the REST API is available. The index exists precisely so the LLM doesn't have to read the vault file-by-file.
+**Do NOT** enumerate `wiki/` via the Obsidian REST API or filesystem globs, even when the REST API is available (a 500× cost multiplier; the witnessed case: `docs/wiki-page-lookup.md`).
 
 ---
 
 ## Ingest Behavior — Duplicate & Related Topic Handling
 
-When `kb add` captures a new URL, follow this flow before creating the wiki page:
-
-1. **Capture first.** Call `mcp__athena__kb_add` to download the raw source. This always happens immediately.
-
-1a. **If capture returns thin content** (auth-blocked), the tool asks the user for help. If the user pastes content, use `mcp__athena__kb_add_content` with the URL, a title extracted from the paste, and the pasted text as content. Then proceed with wiki page creation as normal.
-
-2. **Search for related pages.** After capture, search the KB for existing pages on the same topic (by title keywords, tags, entity names). Use `mcp__athena__kb_search` or scan `related:` links.
-
-3. **If a closely related page exists**, ask the user:
-   - **Merge** — combine into one page with both sources listed at the top, a unified summary, and merged content sections. Use `raw_paths:` (list) and `urls:` (list) in frontmatter.
-   - **Separate** — create a new page with bidirectional cross-references to the existing page.
-
-4. **After creating or merging**, always:
-   - **Bidirectional cross-references** — for each page in `related:`, add a back-link to the new page in that page's `related:` field.
-   - **Rebuild search index** — call `mcp__athena__kb_index` so the new page is discoverable.
-
-**Merge format:** When merging, the merged page keeps the more descriptive title, lists all sources at the top (`[Repo](url) · [Article](url)`), uses `raw_paths:` and `urls:` lists in frontmatter, and combines the best content from both pages. The superseded page is moved to `.kb-trash/` and all wikilinks pointing to it are updated.
+On `kb add`: capture first (thin/auth-blocked → ask the user to paste, then `kb_add_content`), search for related pages, ask **Merge** or **Separate** when one exists, then add bidirectional cross-references and rebuild the index. The full flow and the merge format: `docs/ingest-behavior.md` (read it before every ingest).
 
 ## Response Format
 
@@ -231,25 +209,7 @@ When referencing wiki pages in responses, always use Obsidian wikilink format `[
 
 ## Wiki Page Structure — Connections Section
 
-Every wiki page MUST include a **Connections** section in the body (not just frontmatter `related:`). Frontmatter properties are hidden in Obsidian preview — the user cannot see or click them. The body-level Connections section is the only way the user discovers related pages.
-
-**Two layers of cross-referencing (both required):**
-1. **Frontmatter `related:`** — for graph view, Dataview queries, search index, and lint validation
-2. **Body `## Connections`** — for the user to see and click. Each link includes a brief annotation explaining the relationship.
-
-**Format:**
-```markdown
-## Connections
-
-- [[Related Page Name]] — brief annotation explaining the relationship
-- [[Another Page]] — why this page is relevant
-```
-
-**Placement:** Before `## Keywords` (if present), or at the end of the page content.
-
-**When creating or updating a wiki page:** always ensure both layers exist and are in sync. If a page has `related:` links but no Connections section, add one. If adding a new cross-reference, add it to both `related:` AND the Connections section.
-
-**Bidirectional requirement:** When page A links to page B, page B must also link back to page A — in both frontmatter AND body Connections. The `kb lint` auto-fixes frontmatter; body Connections must be added during ingest or manually.
+Every wiki page MUST carry both frontmatter `related:` and a body `## Connections` section (each link annotated), kept in sync and **bidirectional**. Format and placement: `docs/wiki-page-structure.md` (read it before creating or updating a page).
 
 ---
 

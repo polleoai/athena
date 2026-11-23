@@ -68,16 +68,19 @@ env:
 
 jobs:
   build-and-release:
-    # Releases are published from polleoai/athena only. athena-dev/athena is the
+    # Releases are published from polleoai/athena only. The private dev repo is the
     # dev repo: it carries the same tags (tag-on-bump-merge.yml) and, now that
     # Athena is at its root, GitHub would otherwise run this workflow there too
     # and publish a signed release from the dev repo on every tag.
     if: github.repository == 'polleoai/athena'
     runs-on: ubuntu-latest
+    # Longest green run: 51 s. Caps a hung run's Actions minutes.
+    timeout-minutes: 15
     steps:
       - name: Validate TAG_NAME shape
         run: |
-          if ! echo "$TAG_NAME" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[A-Za-z0-9.]+)?$'; then
+          # Whole-string match: grep matches line by line, so "1.0.0\nx" passed it.
+          if ! [[ "$TAG_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[A-Za-z0-9.]+)?$ ]]; then
             echo "TAG_NAME '$TAG_NAME' does not match expected semver shape (X.Y.Z or X.Y.Z-suffix; no leading zeros)"
             exit 1
           fi
@@ -85,7 +88,7 @@ jobs:
 
       - name: Guard — Gryphon submodule pin must be released (on polleoai/gryphon)
         # The dev auto-fix loop (gryphon-autofix-loop) can pin vendor/gryphon to
-        # a athena-dev/gryphon-dev commit that was never released to polleoai. A
+        # a Gryphon dev-repo commit that was never released to polleoai. A
         # public release's submodule (.gitmodules -> polleoai/gryphon) cannot
         # resolve such a pin, so the checkout-with-submodules step below would
         # fail cryptically. Fail fast and clearly BEFORE that. Release is
@@ -119,6 +122,29 @@ jobs:
       # anyone building from a source archive.
       - name: Assert vendor/gryphon.pin matches the submodule
         run: node scripts/sync-gryphon-pin.js --check
+
+      # Every release ships its notes ("backfill is allowed; gaps are not"):
+      # docs/announcements/<tag>.md and a dated CHANGELOG entry, at the tagged
+      # commit. This is the gate however the tag was made (by hand, a bot, a
+      # future workflow); tag-on-bump-merge.yml's own check covers only the
+      # auto-bump path. npm-build/npm-stage take their files from the release
+      # this job creates, so a gap stops npm too. Pre-release tags
+      # (X.Y.Z-suffix) carry no notes and are exempt.
+      #
+      # Deliberate: a tag cut before this check existed (1.8.20 and older) has
+      # no checker, and its notes were never at the tagged commit, so it can't
+      # be published or re-attested from here. Cut a fresh version from main.
+      - name: Require release notes (no notes, no release)
+        run: |
+          if [[ "$TAG_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.]+$ ]]; then
+            echo "pre-release $TAG_NAME: release notes not required"
+            exit 0
+          fi
+          if [ ! -f scripts/release-notes.js ]; then
+            echo "::error::$TAG_NAME predates scripts/release-notes.js, so its notes can't be checked: cut a fresh version from main"
+            exit 1
+          fi
+          node scripts/release-notes.js --check "$TAG_NAME"
 
       # Obsidian picks what an OLDER app may install from versions.json: the
       # highest entry whose minimum the app meets, downloaded from this repo's
@@ -256,6 +282,8 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     runs-on: ubuntu-latest
+    # Longest green run: 11 s. Caps a hung run's Actions minutes.
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -305,6 +333,8 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     runs-on: ubuntu-latest
+    # Longest green run: 22 s. Caps a hung run's Actions minutes.
+    timeout-minutes: 10
     permissions:
       id-token: write   # OIDC token for npm trusted publishing — this job only
     steps:

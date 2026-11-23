@@ -24,8 +24,10 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 2
+. scripts/lib/tree-lock.sh || exit 2
 
 FAILED=()
+SKIPPED=()
 
 # Test hook: SYNC_FORCE_FAIL="<step> [step...]" makes those steps fail, so the
 # independence and exit-status behaviour can be exercised for real rather than
@@ -65,13 +67,35 @@ pull_if_on_main() {
   git pull --ff-only origin main
 }
 
-step pull    pull_if_on_main
-step build   npm run build:all
+# pull and build rewrite the working tree, so they run only while this run
+# holds the tree lock (scripts/lib/tree-lock.sh). A Pro gate holds it from
+# its pin check through `git bundle`; if it does, they are SKIPPED this hour,
+# said so and by whom, not failed: the next hourly run does them. 11-21: a
+# build at 18:05:11Z made the 18:05:34Z gate refuse on vendor/gryphon.
+# ingest writes the vault only, so it runs either way.
+# Can arcus capture right now? (PGM 2026-11-22, after two months of silent
+# browser failures.) Writes .athena/state/arcus-health.json for PGM's backstop;
+# a failure fails this step only. Same interpreter the plugin picks first.
+athena_python() {
+  if [ -n "${ATHENA_PYTHON:-}" ]; then echo "$ATHENA_PYTHON"
+  elif [ -x "$HOME/.athena/venv/bin/python" ]; then echo "$HOME/.athena/venv/bin/python"
+  else echo python3; fi
+}
+step arcus-health "$(athena_python)" scripts/arcus-health.py
+
+if tree_lock_acquire sync 0; then
+  step pull    pull_if_on_main
+  step build   npm run build:all
+  tree_lock_release
+else
+  echo "── sync: skipped pull + build: the working tree is held ($(tree_lock_holder)) ──"
+  SKIPPED+=(pull build)
+fi
 step ingest  npm run kb:auto-ingest
 
 echo "════════════════════════════════════════════════"
 if [ ${#FAILED[@]} -eq 0 ]; then
-  echo "sync: all steps ok"
+  echo "sync: all steps ok${SKIPPED[0]:+ (skipped: ${SKIPPED[*]})}"
   exit 0
 fi
 echo "sync: FAILED steps: ${FAILED[*]}"

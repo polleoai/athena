@@ -188,11 +188,102 @@ def _article_body(url: str, data: dict, byline: str) -> str:
     return "\n".join(body)
 
 
+INCOMPLETE_NOTE = ("> **Incomplete capture:** this is a long X post, and X only served its "
+                   "first ~280 characters. Open the source for the full text, or paste it "
+                   "with `kb add` to replace this copy.")
+INCOMPLETE_REASON = "x-long-post: syndication served only the opening ~280 characters"
+
+
+def long_text_missing(data: dict) -> bool:
+    """True when the post is a long (note) tweet but the syndication JSON
+    carries no full text for it. Since 2026-11 the CDN returns
+    `note_tweet: {"id": ...}` with no `text`, and `text` is only the ~280-char
+    preview, cut mid-word (witnessed: techNmak/status/2122711743369785617).
+    Using `text` as if it were the post silently stores a fragment."""
+    note = data.get("note_tweet") if isinstance(data, dict) else None
+    if not note:
+        return False
+    return not (isinstance(note, dict) and (note.get("text") or "").strip())
+
+
+_DOMAINISH = re.compile(r"^[\w-]+(?:\.[\w-]+)+/?\S*$")
+
+
+def _is_link_piece(tok: str) -> bool:
+    """A piece of a link as any of the three sources render it: t.co links
+    (preview), the expanded URL (raw), or X's page, which splits a display
+    URL over lines ("https://", "poloclub.github.io/transformer-ex",
+    "plainer/", "…"). Post numbering like "2/" is text, not a link."""
+    if tok[:1] in "![<(":
+        return False  # media/markup: kept, so it reads as "not a continuation"
+    if re.match(r"^https?://", tok) or _DOMAINISH.match(tok):
+        return True
+    return "/" in tok and not re.fullmatch(r"\d+/", tok)
+
+
+def _norm(s: str) -> str:
+    """Lowercased words with link pieces removed, so a link inside the
+    compared span never breaks the match. An ellipsis right after a link is
+    X's display-URL marker and goes too; any other ellipsis stays (it marks a
+    truncated preview)."""
+    out, prev_link = [], False
+    for tok in html.unescape(s or "").split():
+        if _is_link_piece(tok):
+            prev_link = True
+            continue
+        if prev_link and tok in ("\u2026", "..."):
+            continue
+        prev_link = False
+        out.append(tok)
+    return " ".join(out).lower()
+
+
+def preview_text(data: dict) -> str:
+    """The syndication preview with links and media stripped: what a fuller
+    capture of the same post must contain."""
+    lo, hi = (data.get("display_text_range") or [0, None])[:2] if isinstance(
+        data.get("display_text_range"), list) else (0, None)
+    t = (data.get("text") or "")[lo:hi]
+    return re.sub(r"https?://t\.co/\S+", "", t).strip()
+
+
+# What may follow the preview's last words when a page shows only the
+# preview: an ellipsis, "Show more", markup or media, a quoted post
+# ("---" / "**Quoting"), or X's timestamp line.
+_NOT_CONTINUATION = re.compile(
+    r"^\s*(?:\u2026|\.\.\.|show more|<|!\[|\[|\(|---|\*\*quoting|quote|>|\d{1,2}:\d{2}\b|$)")
+
+
+def fuller_capture(candidate: str, data: dict) -> bool:
+    """True when `candidate` (a browser/arcus capture of the same URL) holds
+    the post PAST the point where the syndication preview stops: the
+    preview's last words appear and are followed by more post text, not an
+    ellipsis, "Show more", markup, a timestamp or the end. Length alone is not
+    enough: a page that shows the same preview plus a title, byline and page
+    chrome is longer but no fuller (the check rated the truncated techNmak
+    copy itself as fuller until 2026-11-17). Stops a login wall, an error
+    page or another post on the page from replacing a real fragment."""
+    cand = _norm(candidate)
+    head = _norm(preview_text(data))
+    if not cand or not head or head[:60] not in cand:
+        return False
+    tail = head[-30:]
+    start = cand.find(head[:60])
+    i = cand.find(tail, start)
+    if i < 0:
+        return False
+    rest = cand[i + len(tail):]
+    return len(rest.strip()) >= 20 and not _NOT_CONTINUATION.match(rest)
+
+
 def _tweet_body(data: dict, byline: str) -> str:
     """Markdown body for a regular tweet (incl. long `note_tweet` text)."""
     note = (data.get("note_tweet") or {}).get("text")
     text = note if note else (data.get("text") or "")
     text = _expand_urls(html.unescape(text), data)
+    if long_text_missing(data):
+        # The preview ends with the media t.co link; the cut is mid-sentence.
+        text = (text.rstrip() + "…\n\n" + INCOMPLETE_NOTE) if text else INCOMPLETE_NOTE
 
     body = []
     if byline:
@@ -256,6 +347,8 @@ def build_raw(url: str, data: dict) -> str:
         f'source: "{_yaml_escape(url)}"',
         'clipped_via: "tweet-syndication"',
     ]
+    if not is_article and long_text_missing(data):
+        fm.append(f'capture_incomplete: "{INCOMPLETE_REASON}"')
     if byline:
         fm.append(f'author: "{_yaml_escape(byline)}"')
     fm.append("---")
@@ -279,7 +372,9 @@ def main(argv: list[str]) -> int:
     if not raw or not raw.strip():
         return 1
     sys.stdout.write(raw)
-    return 0
+    # 3 = a usable floor, but incomplete: the caller should try a fuller
+    # capture (a browser) first and keep this only if that fails.
+    return 3 if long_text_missing(data) else 0
 
 
 if __name__ == "__main__":

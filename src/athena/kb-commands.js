@@ -49,6 +49,8 @@ const KB_COMMANDS = [
   { cmd: "kb undo",                    desc: "Restore last trashed files" },
   { cmd: "kb trash",                   desc: "List items in trash" },
   { cmd: "kb purge",                   desc: "Permanently delete old trash" },
+  { cmd: "kb audit tail [N]",          desc: "Last N destructive-operation log entries" },
+  { cmd: "kb audit grep <text>",       desc: "Search the audit log" },
 ];
 
 // Shown while a mechanical command is executing.
@@ -65,6 +67,7 @@ const STATUS_MAP = {
   insight: "Listing insights...",
   rules: "Loading rules...",
   regen: "Synthesizing wiki digest...",
+  audit: "Reading the audit log...",
 };
 
 // Shown after the command completes successfully. Each entry names what
@@ -82,6 +85,7 @@ const DONE_STATUS_MAP = {
   insight: "Insights listed",
   rules: "Rules loaded",
   regen: "Synthesis complete",
+  audit: "Audit log read",
 };
 
 function detectMechanicalCommand(text) {
@@ -100,6 +104,11 @@ function detectMechanicalCommand(text) {
     { pattern: /^kb\s+journal\s+--recent$/i, command: "journal", args: ["--recent"] },
     { pattern: /^kb\s+insight\s+--list$/i, command: "insight", args: ["--list"] },
     { pattern: /^kb\s+rules$/i, command: "rules", args: [] },
+    // #180: read the audit log. `kb audit record` is internal (the plugin's
+    // own deny logging) and is never routed from typed chat.
+    { pattern: /^kb\s+audit\s+tail$/i, command: "audit", args: ["tail"] },
+    { pattern: /^kb\s+audit\s+tail\s+(\d+)$/i, command: "audit", argsMatchAll: ["tail", 1] },
+    { pattern: /^kb\s+audit\s+grep\s+(.+)$/i, command: "audit", argsMatchAll: ["grep", 1] },
     { pattern: /^kb\s+add$/i, command: "add", args: [] },
     { pattern: /^kb\s+add\s+(https?:\/\/\S+)$/i, command: "add", argsMatch: 1 },
     // `kb refresh <url>` — regenerate the wiki page for an existing

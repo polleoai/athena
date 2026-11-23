@@ -33,6 +33,7 @@
 // Use playwright-extra + stealth plugin to defeat LinkedIn's automation
 // detection. Falls back to plain playwright if either dep is missing
 // (so the script still works in environments without the stealth deps).
+const urlGuard = require("./lib/url-guard"); // #243
 let chromium;
 try {
   const playwrightExtra = require("playwright-extra");
@@ -239,6 +240,16 @@ async function main() {
     console.error("  --cdp-port N   port for --cdp-attach (default 9222)");
     process.exit(2);
   }
+  // #243: refuse a local / private-network URL (or a name resolving to one)
+  // before any browser starts. Requests made after navigation are checked by
+  // the page-level guard installed below.
+  if (url && !setupFlag) {
+    const startReason = await urlGuard.resolvedUrlReason(url);
+    if (startReason) {
+      console.error(`capture-deep: refusing to open ${url}: ${startReason}`);
+      process.exit(2);
+    }
+  }
   // X-Article detection. When the URL is an x.com/i/article/<id> (or the
   // legacy twitter.com host), we drive a pre-seeded X session instead of
   // LinkedIn: the X cookie was imported into the shared persistent profile
@@ -409,11 +420,13 @@ async function main() {
     }
 
     ctx = await chromium.launchPersistentContext(AUTH_DIR, {
+      serviceWorkers: "block", // #243: SW requests bypass page.route
       headless: !needsLogin,
       viewport: { width: 1280, height: 1024 },
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     });
+    await urlGuard.installUrlGuard(ctx); // #243: owned context — covers popups too
 
     if (needsLogin) {
     const loginPage = await ctx.newPage();
@@ -469,6 +482,10 @@ async function main() {
   }  // ← closes else-branch of cdpAttachFlag (the launchPersistentContext path)
 
   const page = await ctx.newPage();
+  // #243: every request this page makes (the navigation, its redirects,
+  // frames, scripts) is checked against localhost / private networks.
+  await urlGuard.hardenPage(page);
+  await urlGuard.installUrlGuard(page);
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
   // Extra settle time for LinkedIn's progressive hydration
   await page.waitForTimeout(3000);

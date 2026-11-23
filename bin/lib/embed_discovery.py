@@ -76,9 +76,12 @@ _EMBED_TAG_RE = re.compile(
 
 
 def _is_denied(url: str) -> bool:
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
+    from url_safety import is_internal_url
+
+    # Non-http(s) schemes, localhost, private / link-local / metadata IPs (#242).
+    if is_internal_url(url):
         return True
+    parsed = urlparse(url)
     host_path = (parsed.netloc + parsed.path).lower()
     return any(bad in host_path for bad in _EMBED_HOST_DENYLIST)
 
@@ -99,6 +102,11 @@ def extract_embed_urls(html: str, base_url: str) -> list[str]:
     for m in _EMBED_TAG_RE.finditer(html):
         raw_src = (m.group("src") or "").strip()
         if not raw_src:
+            continue
+        # urljoin strips tab/CR/LF before parsing, so check the src as written.
+        from url_safety import has_ambiguous_chars
+
+        if has_ambiguous_chars(raw_src):
             continue
         # Resolve relative→absolute; drop the fragment — an embed's #slide=3
         # anchor is the same source. Keep the trailing slash as the site wrote
@@ -125,6 +133,8 @@ def fetch_html(url: str, timeout: int = 15) -> str | None:
     """
     import urllib.request
 
+    from url_safety import safe_urlopen  # #243: redirects + DNS checked
+
     try:
         req = urllib.request.Request(
             url,
@@ -136,7 +146,7 @@ def fetch_html(url: str, timeout: int = 15) -> str | None:
                 )
             },
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with safe_urlopen(req, timeout=timeout) as resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             if "html" not in ctype and ctype:
                 return None

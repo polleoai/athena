@@ -34,6 +34,12 @@ RRF_K = 60  # standard constant from the original RRF paper
 FASTEMBED_MODEL = 'BAAI/bge-small-en-v1.5'
 FASTEMBED_DIMENSIONS = 384
 OLLAMA_MODEL = 'nomic-embed-text'
+# Pinned context for Ollama embed calls (#240). With no num_ctx, Ollama on a
+# 64 GB machine loads a model at its maximum context (voiceagent measured
+# qwen3:4b at 262144 / 41 GB). The longest text Athena embeds is a 500-word
+# chunk (~700 tokens) or a title + 2000 chars of body, so 2048 covers it
+# with room to spare; `truncate` makes an outlier cut, never fail.
+OLLAMA_NUM_CTX = 2048
 OLLAMA_DIMENSIONS = 768
 
 
@@ -614,7 +620,8 @@ def _ollama_embed_single(text):
     """
     import http.client
     try:
-        payload = json.dumps({'model': OLLAMA_MODEL, 'input': text}).encode('utf-8')
+        payload = json.dumps({'model': OLLAMA_MODEL, 'input': text, 'truncate': True,
+                              'options': {'num_ctx': OLLAMA_NUM_CTX}}).encode('utf-8')
         conn = http.client.HTTPConnection('127.0.0.1', 11434, timeout=30)
         conn.request('POST', '/api/embed', body=payload,
                      headers={'Content-Type': 'application/json'})

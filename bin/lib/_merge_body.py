@@ -1,4 +1,4 @@
-import sys, os, re, glob
+import sys, os, re, glob, json
 
 KB = sys.argv[1]
 args = sys.argv[2:]
@@ -81,7 +81,15 @@ def extract_frontmatter(filepath):
         match = re.match(r'^(\w[\w_]*)\s*:\s*(.*)', lines[i])
         if match:
             key = match.group(1)
-            val = match.group(2).strip().strip('"')
+            _rawval = match.group(2).strip()
+            val = _rawval.strip('"')
+            # A double-quoted YAML scalar carries escapes (`\"AI incidents\"`):
+            # decode it, or the merged section heading shows the backslashes.
+            if len(_rawval) >= 2 and _rawval[0] == _rawval[-1] == '"':
+                try:
+                    val = json.loads(_rawval)
+                except ValueError:
+                    pass
             if not val or val == '':
                 items = []
                 while i + 1 < len(lines) and re.match(r'^\s+-\s+', lines[i + 1]):

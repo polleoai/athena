@@ -195,6 +195,18 @@ def _check_raw_orphans():
     return new_orphans, resolved
 
 
+def _remove_args(arguments):
+    """bin/kb remove args for the kb_remove tool. `kb remove` is documented
+    as moving the page and its raw together, so with_raw defaults to true:
+    the old false default turned a chat "kb delete" into an orphan raw that
+    lint rebuilt into the page (2026-11-22). kb remove keeps any raw another
+    page still lists."""
+    args = [arguments.get("page", ""), "--yes"]
+    if arguments.get("with_raw", True):
+        args.append("--with-raw")
+    return args
+
+
 def _run_post_lint():
     """Run kb lint after write operations and return a one-line summary."""
     ok, stdout, stderr = _kb_run("lint")
@@ -381,7 +393,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "page": {"type": "string", "description": "Page name to remove"},
-                "with_raw": {"type": "boolean", "description": "Also trash the raw source file", "default": False},
+                "with_raw": {"type": "boolean", "description": "Also trash the raw source (the documented `kb remove`: page and raw move together). A raw another page still lists is always kept. False keeps it.", "default": True},
             },
             "required": ["page"],
         },
@@ -760,11 +772,7 @@ async def handle_tool(name, arguments):
         return [TextContent(type="text", text=result_text)]
 
     elif name == "kb_remove":
-        page = arguments.get("page", "")
-        args = [page, "--yes"]
-        if arguments.get("with_raw"):
-            args.append("--with-raw")
-        ok, stdout, stderr = _kb_run("remove", *args)
+        ok, stdout, stderr = _kb_run("remove", *_remove_args(arguments))
         result_text = stdout if ok else f"Error: {stderr or stdout}"
         if ok: result_text += _run_post_lint()
         return [TextContent(type="text", text=result_text)]

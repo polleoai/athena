@@ -23,6 +23,16 @@ Usage (from vault root):
 Resumable: completed pages logged to scripts/.bulk-regen-state.json. Re-runs
 skip already-completed pages unless --reset-state is passed.
 
+Cost ceiling (--max-usd, default $10, #179): the sweep adds up each call's
+total_cost_usd and passes what is left as the call's own --max-budget-usd.
+At the cap it stops cleanly: finished pages stay in the state file, the
+count left and a resume hint are printed, exit 3. The default is low on
+purpose so an unattended run can't drain a wallet; raise it explicitly for a
+big sweep. The CLI checks its budget after a turn, so the last call can pass
+the cap by up to one call's cost. A call whose cost can't be read also stops
+the sweep (an unreadable cost is never counted as 0). Under a subscription
+the figure is the CLI's API-equivalent cost, still the right usage guard.
+
 Why CLI not API: user has Claude Code subscription; CLI invocation is
 subscription-billed (free at usage tier) instead of per-token.
 """
@@ -45,6 +55,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin" / "lib"))
 from wiki_page import preprocess_content  # noqa: E402
 from _athena_timeout import (  # noqa: E402
+    DEFAULT_MAX_USD,
+    Budget,
+    BudgetExceeded,
+    extract_structured_output,
     extract_text_from_stream_json,
     resolve_timeout_seconds,
     run_claude_with_idle_timeout,
@@ -57,7 +71,11 @@ MAX_BODY_CHARS = 12000  # truncate body sent to LLM (token budget)
 MIN_SUMMARY = 100
 MAX_SUMMARY = 600
 
-MODEL = "claude-opus-4-7"
+# The current Opus, from Gryphon's registry (#182): no hardcoded id to go
+# stale when Gryphon retires one (claude-opus-4-7 was, in 2.13.0).
+from _athena_models import claude_model  # noqa: E402
+
+MODEL = claude_model("opus")
 
 DIGEST_SYSTEM_PROMPT = """You are writing a structured digest for a page in a personal knowledge base (Obsidian vault). The KB stores technical content: AI papers, security research, blog posts, LinkedIn/X posts, GitHub repos, videos, and conference talks. The user is a practitioner who needs to quickly recall what each page contains and why it matters.
 
@@ -340,14 +358,51 @@ def quality_check_body(body: str) -> tuple[bool, str]:
     return True, ""
 
 
+# The digest's JSON Schema, passed to `claude -p --json-schema` (#181): the
+# CLI validates the reply and hands back the object, so no regex parse of
+# model text unless it gave none (then the old text parse is the fallback).
+DIGEST_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "body": {"type": "string"},
+    },
+    "required": ["summary", "body"],
+    "additionalProperties": False,
+}
+
+
+def _parse_digest_text(out: str) -> dict | None:
+    """Pre-#181 parse of the reply text: fences stripped, then the whole
+    text or its first {…} as JSON. Only when no structured_output came."""
+    out = re.sub(r'^```(?:json)?\s*', '', out, flags=re.MULTILINE)
+    out = re.sub(r'\s*```\s*$', '', out, flags=re.MULTILINE)
+    out = out.strip()
+    try:
+        result = json.loads(out)
+    except json.JSONDecodeError:
+        m = re.search(r'\{.*\}', out, re.DOTALL)
+        if not m:
+            return None
+        try:
+            result = json.loads(m.group())
+        except json.JSONDecodeError:
+            return None
+    return result if isinstance(result, dict) else None
+
+
 def call_claude_for_digest(
-    title: str, source_type: str, existing_summary: str, body: str
+    title: str, source_type: str, existing_summary: str, body: str,
+    budget: Budget | None = None,
 ) -> dict:
     """Invoke `claude -p` and return { summary, body } dict.
 
-    Raises RuntimeError on subprocess failure.
-    Returns empty dict on parse failure (caller decides whether to retry).
+    Raises RuntimeError on subprocess failure, BudgetExceeded when <budget>
+    is spent (checked before the call) or the call hit or can't report its
+    cost. Returns empty dict on parse failure (caller decides whether to retry).
     """
+    if budget is not None:
+        budget.check()
     user_prompt = (
         f"PAGE TITLE: {title}\n"
         f"SOURCE TYPE: {source_type or 'unknown'}\n"
@@ -363,38 +418,28 @@ def call_claude_for_digest(
         "--verbose",
         "--include-partial-messages",
         "--model", MODEL,
+        "--json-schema", json.dumps(DIGEST_JSON_SCHEMA),
         "--append-system-prompt", DIGEST_SYSTEM_PROMPT,
-        user_prompt,
     ]
+    if budget is not None:
+        cmd += ["--max-budget-usd", f"{budget.remaining():.6f}"]
+    cmd.append(user_prompt)  # the prompt stays the last argument
     idle_s = resolve_timeout_seconds(MODEL, vault=VAULT)
     rc, raw_out, raw_err = run_claude_with_idle_timeout(cmd, idle_s)
+    if budget is not None:
+        budget.charge(raw_out)  # before the rc check: a budget stop exits 1
     if rc != 0:
         raise RuntimeError(
             f"claude -p exit {rc}: stderr={raw_err.strip()[:500] or '(empty)'}"
         )
-    out = extract_text_from_stream_json(raw_out).strip()
-
-    # Strip markdown code fences if model wrapped output
-    out = re.sub(r'^```(?:json)?\s*', '', out, flags=re.MULTILINE)
-    out = re.sub(r'\s*```\s*$', '', out, flags=re.MULTILINE)
-    out = out.strip()
-
-    # Parse JSON
-    try:
-        result = json.loads(out)
-    except json.JSONDecodeError:
-        # Try to find JSON object in output
-        m = re.search(r'\{.*\}', out, re.DOTALL)
-        if m:
-            try:
-                result = json.loads(m.group())
-            except json.JSONDecodeError:
-                return {}
-        else:
+    result = extract_structured_output(raw_out)
+    if result is None:
+        text = extract_text_from_stream_json(raw_out).strip()
+        print(f"  [warn] no structured_output from claude; text parse of: {text[:200]!r}",
+              file=sys.stderr)
+        result = _parse_digest_text(text)
+        if result is None:
             return {}
-
-    if not isinstance(result, dict):
-        return {}
 
     # Normalize fields
     summary = result.get("summary", "").strip()
@@ -442,7 +487,15 @@ def main() -> int:
     p.add_argument("--only-newer-than-mins", type=int, default=0,
                    help="Only process pages whose mtime is newer than N "
                         "minutes ago (default: 0 = no filter).")
+    p.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD,
+                   help=f"Stop the sweep once its calls have cost this many USD "
+                        f"(default: {DEFAULT_MAX_USD:g}; low on purpose, raise it for a big sweep)")
     args = p.parse_args()
+    try:
+        budget = Budget(args.max_usd)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
     if not WIKI_FORMAT.is_dir():
         print(f"Vault not found at {WIKI_FORMAT}", file=sys.stderr)
@@ -468,6 +521,7 @@ def main() -> int:
     stats = {"updated": 0, "skipped_done": 0, "skipped_no_fm": 0,
              "skipped_redirect": 0, "failed": 0}
     started = time.time()
+    stopped = ""
 
     for idx, wiki_path in enumerate(paths, start=1):
         if args.limit and stats["updated"] >= args.limit:
@@ -498,7 +552,10 @@ def main() -> int:
         last_reason = ""
         for attempt in range(args.max_retries + 1):
             try:
-                result = call_claude_for_digest(title, source_type, existing, body)
+                result = call_claude_for_digest(title, source_type, existing, body, budget=budget)
+            except BudgetExceeded as exc:
+                stopped = str(exc)
+                break
             except (TimeoutError, RuntimeError) as exc:
                 print(f"  call failed (attempt {attempt+1}): {exc}", flush=True)
                 result = {}
@@ -519,6 +576,9 @@ def main() -> int:
             print(f"  quality-fail (attempt {attempt+1}): {last_reason}", flush=True)
             result = {}
 
+        if stopped:
+            left = sum(1 for pp in paths[idx - 1:] if str(pp.relative_to(VAULT)) not in completed)
+            break
         if not result:
             stats["failed"] += 1
             print(f"  GIVE UP after {args.max_retries+1} attempts: {last_reason}", flush=True)
@@ -549,8 +609,14 @@ def main() -> int:
     print(f"=== bulk-llm-regen done in {elapsed:.0f}s ===")
     for k, v in stats.items():
         print(f"  {k}: {v}")
+    print(f"  spent: ${budget.spent:.4f} of ${budget.cap:.2f}")
     if args.dry_run:
         print("(dry-run — no files written, state not updated)")
+    if stopped:
+        print(f"STOPPED at the cost cap: {stopped}. {left} page(s) left.")
+        print("Resume: re-run the same command with a higher --max-usd; finished pages "
+              f"are kept in {STATE_FILE} and skipped.")
+        return 3
     return 0
 
 

@@ -108,6 +108,13 @@ def _is_downloadable_url(url: str) -> bool:
     return scheme in ("http", "https")
 
 
+def _internal_reason(url: str) -> str:
+    """Why an http(s) image URL must not be fetched (#243), or "".
+    Image URLs come from the captured page, so they are page-controlled."""
+    from url_safety import internal_url_reason
+    return internal_url_reason(url)
+
+
 _DATA_URI_RE = re.compile(r"^data:([^;,]+)?(?:;([^,]+))?,(.*)$", re.DOTALL)
 
 
@@ -147,8 +154,9 @@ def _decode_data_uri(uri: str) -> tuple[bytes, str] | None:
 
 def _download(url: str) -> tuple[bytes, str]:
     """Fetch URL bytes + content-type. Raises on any failure."""
+    from url_safety import safe_urlopen  # #243: redirects + DNS checked
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+    with safe_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
         ct = resp.headers.get("Content-Type", "") or ""
         # Read with a hard cap so a misbehaving server can't OOM us.
         data = resp.read(MAX_BYTES + 1)
@@ -238,6 +246,19 @@ def download_assets(markdown: str, page_slug: str, vault: Path) -> str:
         # Already-local references shouldn't be touched.
         if url.startswith(("../", "./", "/")) or not url.startswith(("http://", "https://")):
             return match.group(0)
+
+        # A page-controlled image URL pointing at the local machine or a
+        # private network (#243): never fetched, and the embed is dropped so
+        # Obsidian's preview doesn't fetch it either. Not logged to
+        # asset-retry.tsv — retrying it would only be refused again.
+        reason = _internal_reason(url)
+        if reason:
+            sidecar["failures"].append({
+                "url": "(refused internal URL)", "alt": alt,
+                "error": f"refused: {reason}",
+                "tried_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+            return alt
 
         if url in seen:
             local_name = seen[url]

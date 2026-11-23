@@ -307,6 +307,19 @@ def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], d
     HtmlProvider stays unaware, which keeps the architectural split clean.
     Witnessed 2026-05-19: Microsoft Security Blog article returned 1.2KB
     via the default path (nav only); deep mode is the right tool there."""
+    # #243: refuse a name that resolves to a private address before handing
+    # it over (a clear error up front); arcus checks every hop itself.
+    from url_safety import resolved_url_reason
+    reason = resolved_url_reason(url)
+    if reason:
+        raise ArcusHtmlError(f"refusing to fetch {url}: {reason}")
+    # Every hop and connection inside arcus (urllib, Playwright) goes through
+    # Athena's policy; see url_safety.install_arcus_guard.
+    from url_safety import install_arcus_guard
+    try:
+        install_arcus_guard()
+    except ImportError as e:
+        raise ArcusHtmlError(str(e)) from e
     if deep:
         try:
             from arcus.provider_runtime.providers.html._athena_fetch_page import (
@@ -316,15 +329,21 @@ def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], d
             raise ArcusHtmlError(
                 f"arcus-provider-runtime not installed: {e}"
             ) from e
-        if _is_x_url(url):
-            # X.com still uses xcom path; deep flag is ignored — tweet
-            # threading is already exhaustive (per-article DOM walk).
-            result = fetch_x_tweet(url) or {}
-            body = result.get("text", "") or ""
-            images = result.get("images") or []
-        else:
-            body = fetch_page(url, deep=True) or ""
-            images = []
+        from arcus_errors import one_line
+        try:
+            if _is_x_url(url):
+                # X.com still uses xcom path; deep flag is ignored — tweet
+                # threading is already exhaustive (per-article DOM walk).
+                result = fetch_x_tweet(url) or {}
+                body = result.get("text", "") or ""
+                images = result.get("images") or []
+            else:
+                body = fetch_page(url, deep=True) or ""
+                images = []
+        except Exception as e:  # noqa: BLE001 — arcus's reason, as an adapter error
+            raise ArcusHtmlError(
+                f"arcus deep extraction failed for {url}: "
+                f"{one_line(f'{type(e).__name__}: {e}')}") from e
         if not body.strip():
             raise ArcusHtmlError(f"arcus deep extraction returned empty for {url}")
         return body, images, {
@@ -363,9 +382,13 @@ def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], d
     # prepended so www-only hosts still capture. (Anchor: provos.org, 2026-06-27.)
     fetch_variants = _www_variants(url)
 
+    from arcus_errors import failure_reason, with_reason
     payload = arcus_body = None
     last_exit = None
+    last_reason = ""
     for variant in fetch_variants:
+        if variant != url and resolved_url_reason(variant):
+            continue  # the www. variant is its own name (#243)
         with tempfile.TemporaryDirectory(prefix="athena-arcus-html-") as tmp:
             out_dir = Path(tmp)
             with _silence_fds():
@@ -373,10 +396,10 @@ def extract_html_url(*, url: str, deep: bool = False) -> tuple[str, list[str], d
             if last_exit == EXIT_CODES["SUCCESS"]:
                 payload, arcus_body = _read_arcus_outputs(out_dir)
                 break
+            last_reason = failure_reason(out_dir) or last_reason
     if payload is None:
-        raise ArcusHtmlError(
-            f"arcus extraction failed (exit {last_exit}) for {url}"
-        )
+        raise ArcusHtmlError(with_reason(
+            f"arcus extraction failed (exit {last_exit}) for {url}", last_reason))
 
     metadata = payload.get("metadata") or {}
     extractor_detail = payload.get("extractor_detail") or {}

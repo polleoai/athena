@@ -11,12 +11,13 @@ moved. `process_clip()` now delegates to `unified_ingest.ingest()`.
 This file proves the migration preserved behavior, two ways:
 
   1. TestOldVsNewEquivalence — loads the literal pre-migration `process_clip`
-     from its git blob and runs BOTH the old and new entry point over the
+     from tests/fixtures/process_clip_pre_migration.py (a verbatim, sha256-
+     pinned copy of the git blob) and runs BOTH the old and new entry point over the
      SAME clip fixtures in isolated temp vaults, then asserts the produced
      raw artifact is equivalent (body byte-identical; frontmatter identical
      modulo volatile date fields; same URLs auto-queued). This is the
-     direct "functions the same as before the refactor" guard. It self-skips
-     if the old blob can't be loaded (non-git checkout / bundled plugin copy).
+     direct "functions the same as before the refactor" guard. It runs in
+     every tree, git checkout or not, and never skips.
 
      One deliberate frontmatter exception: the post-migration 1.6.2
      resolvable-Source fix records the resolvable ORIGINAL url (not the
@@ -26,8 +27,8 @@ This file proves the migration preserved behavior, two ways:
 
   2. TestWebpagePipelineCharacterization — durable property assertions on the
      CURRENT path for each transform, so a future edit to the orchestration
-     that breaks one transform fails loudly with a readable message even
-     when the git-blob comparison isn't available.
+     that breaks one transform fails loudly with a readable message, not
+     only as an old-vs-new diff.
 
 Run from vault root:
     python3 -m pytest tests/test_pipeline_parity.py -v
@@ -38,7 +39,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -174,78 +174,32 @@ def _body_of(raw_path: Path) -> str:
     return body
 
 
+# The literal pre-migration process_clip: `git show a44a03ce^:Projects/athena/
+# bin/lib/process_clip.py`, the parent of the commit that delegated it to
+# unified_ingest (2026-05-24), committed verbatim as a fixture. It used to be
+# read from git history at test time, which made the result depend on the
+# repo the test ran in. Every dev clone resolved this blob and passed, but a
+# tree with other history (the public release tree) resolved a different
+# "pre-migration" version and failed: the 3 TestOldVsNewEquivalence entries
+# in tests/known-failures.txt (#239). The sha256 pins the fixture so an edit
+# to it can't pass silently.
+_OLD_PROCESS_CLIP = Path(__file__).resolve().parent / "fixtures" / "process_clip_pre_migration.py"
+_OLD_PROCESS_CLIP_SHA256 = "17391d17910b8bf54b4834c24f7507919e47dbb38d197ec2a7e1ca7e9dfe1f7e"
+
+
 def _load_old_process_clip():
-    """Import the pre-migration process_clip from its git blob as a distinct
-    module `process_clip_old`. Returns the module, or None if it can't be
-    loaded (not a git checkout, blob missing, or import error in this env).
-
-    The pre-migration ref is resolved dynamically as the PARENT of the first
-    commit that introduced `from unified_ingest import` into process_clip.py
-    — robust to future rebases/SHAs rather than hardcoding a short hash.
-    """
-    try:
-        root = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(_VAULT), capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        # git's index is case-sensitive even on a case-insensitive FS, so
-        # discover the exact tracked path rather than guessing its casing.
-        # NB: ls-files also matches the bundled plugin copy under
-        # .obsidian/plugins/athena/bin/lib/ — exclude it; the canonical
-        # pipeline (and the only history with the delegation commit) is the
-        # top-level bin/lib copy.
-        tracked = [
-            p for p in subprocess.run(
-                ["git", "-C", root, "ls-files", "*bin/lib/process_clip.py"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip().splitlines()
-            if "/.obsidian/" not in p
-        ]
-        if not tracked:
-            return None
-        # Prefer the shortest remaining path (the canonical .../athena/bin/lib).
-        tracked_path = min(tracked, key=len)
-
-        # --follow: the file moved (Projects/athena/bin/lib -> bin/lib when Athena
-        # became the repo root), and the delegation commit predates the move. A
-        # plain path-limited log stops at the move, finds nothing, and the test
-        # silently degrades to a skip. --name-only yields the path the file had
-        # AT each commit, which is the path `git show` needs at the old ref.
-        log = subprocess.run(
-            ["git", "-C", root, "log", "--follow", "-S", "from unified_ingest import",
-             "--format=%x00%H", "--name-only", "--", tracked_path],
-            capture_output=True, text=True, check=True,
-        ).stdout
-        hits = []
-        for rec in log.split("\x00")[1:]:
-            lines = [ln for ln in rec.splitlines() if ln.strip()]
-            if len(lines) >= 2:
-                hits.append((lines[0], lines[-1]))
-        if not hits:
-            return None
-        first_sha, path_then = hits[-1]  # oldest: the delegation commit
-        old_ref = first_sha + "^"  # parent of the delegation commit
-
-        blob = subprocess.run(
-            ["git", "-C", root, "show", f"{old_ref}:{path_then}"],
-            capture_output=True, text=True, check=True,
-        ).stdout
-        if "def process_clip(" not in blob or "from unified_ingest import" in blob:
-            return None  # sanity: must be the pre-delegation version
-
-        tmp = tempfile.NamedTemporaryFile(
-            "w", suffix="_process_clip_old.py", delete=False, encoding="utf-8"
-        )
-        tmp.write(blob)
-        tmp.close()
-        spec = importlib.util.spec_from_file_location("process_clip_old", tmp.name)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # imports raw_writer/url_canonical from bin/lib
-        return module
-    except (subprocess.CalledProcessError, OSError, ImportError, AttributeError,
-            IndexError, Exception):
-        return None
+    """Import the pre-migration process_clip fixture as `process_clip_old`.
+    Raises if the fixture is missing or altered: a skip here would hide a
+    broken parity guard."""
+    import hashlib
+    data = _OLD_PROCESS_CLIP.read_bytes()
+    got = hashlib.sha256(data).hexdigest()
+    if got != _OLD_PROCESS_CLIP_SHA256:
+        raise AssertionError(f"{_OLD_PROCESS_CLIP.name} changed: sha256 {got}")
+    spec = importlib.util.spec_from_file_location("process_clip_old", _OLD_PROCESS_CLIP)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # imports raw_writer/url_canonical from bin/lib
+    return module
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -268,9 +222,6 @@ class TestOldVsNewEquivalence(unittest.TestCase):
         cls.old = _load_old_process_clip()
 
     def setUp(self):
-        if self.old is None:
-            self.skipTest("pre-migration process_clip blob unavailable "
-                          "(not a git checkout, or bundled plugin copy)")
         # Disable LinkedIn → capture-deep auto-promote so both paths process
         # the Web-Clipper body directly (no subprocess / network).
         self._saved_env = {

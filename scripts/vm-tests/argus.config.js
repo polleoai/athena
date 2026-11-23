@@ -29,18 +29,30 @@
 
 const path = require("path");
 
+// The user's rule (2026-11-16): Athena's VM/GUI runs happen on the Pro, never
+// the Max, so `npx argus vm-run` is refused there too, not only via npm.
+// Inside a VM the flat bundle has no scripts/lib/, and a VM isn't the Max.
+const _proOnly = path.join(__dirname, "..", "lib", "pro-only.js");
+if (require("fs").existsSync(_proOnly)) require(_proOnly).refuseOnMax("vm-tests argus");
+
 // Athena vault root: scripts/vm-tests → scripts → <root>.
 const ATHENA_ROOT = path.resolve(__dirname, "..", "..");
 // The argus harness repo — bundled to <bundle-root>/argus so the VM resolves
 // @shared/argus offline (package.vm.json → file:argus) and runs the shipped
-// runner as `node argus/src/host/vm-run-side.js`.
-const ARGUS_REPO = path.resolve(ATHENA_ROOT, "..", "..", "Projects", "argus");
+// runner as `node argus/src/host/vm-run-side.js`. The default is the Max's
+// layout; a Pro run (pro-matrix-payload.sh) sets ARGUS_REPO to the pinned
+// argus checkout, because there the default points at a folder that doesn't
+// exist (run -2, 11-21: ENOENT ~/pro-runs/Projects/argus).
+const ARGUS_REPO = process.env.ARGUS_REPO
+  ? path.resolve(process.env.ARGUS_REPO)
+  : path.resolve(ATHENA_ROOT, "..", "..", "Projects", "argus");
 
 // Built-plugin + resource source dirs on the HOST (built by `npm run
 // build:all` into .obsidian/plugins/<id>/). In the VM the shipped runner
 // (OR-4) overrides these via the `resources` env vars below.
 const HOST_ATHENA_PLUGIN = path.join(ATHENA_ROOT, ".obsidian", "plugins", "athena");
 const HOST_GRYPHON_PLUGIN = path.join(ATHENA_ROOT, ".obsidian", "plugins", "gryphon");
+const GRYPHON_PROVIDER_RUNTIME = path.join(ATHENA_ROOT, "vendor", "gryphon", "packages", "provider-runtime");
 
 // Real-network ingest matrix (05-kb-add-url-matrix): gated by RUN_NET_TESTS=1,
 // exactly like host mode (`RUN_NET_TESTS=1 npm run test:host`). When enabled, the
@@ -107,6 +119,15 @@ const NET_TEARDOWN_WIN =
   "\"C:\\Users\\Public\\athena-venv\",\"$env:USERPROFILE\\.local\\bin\\uv*\",\"$env:LOCALAPPDATA\\uv\" " +
   "-ErrorAction SilentlyContinue";
 
+// The Gryphon fixture's model, from the vendored registry (#182): the literal
+// that was here, claude-opus-4-8, went stale when Gryphon 2.13.0 retired it. Inside
+// a VM bundle there is no vendor/; there "sonnet" stands in, an alias
+// Gryphon's own settings migration resolves on load (the key is a mock).
+function _fixtureModel() {
+  const reg = path.join(__dirname, "..", "..", "vendor", "gryphon", "packages", "provider-config", "dist", "registry.js");
+  return require("fs").existsSync(reg) ? require(reg).defaultModelFor("anthropic") : "sonnet";
+}
+
 module.exports = {
   driver: "playwright",
   launcher: "obsidian",
@@ -146,7 +167,7 @@ module.exports = {
         sourceDir: process.env.GRYPHON_PLUGIN_DIR || HOST_GRYPHON_PLUGIN,
         data: {
           provider: "anthropic-api",
-          model: "claude-opus-4-8",
+          model: _fixtureModel(),
           anthropicApiKey: "mock-key-for-tests",
           openaiApiKey: "mock-key-for-tests",
           googleApiKey: "mock-key-for-tests",
@@ -229,7 +250,9 @@ module.exports = {
         driverInstall: "npm install",  // transport runs it via `cmd /c`; cleaned with the workspace
         runCmd: "node argus/src/host/vm-run-side.js",
         killOnCleanup: ["obsidian", "electron", "chrome", "chromium"],
-        bootTimeoutMs: 180000,
+        // argus's Windows default (20 min): a first logon, updates or a repair
+        // after a forced stop run long. 180 s failed matrix -3 (11-21).
+        bootTimeoutMs: 1200000,
       },
     },
   },
@@ -253,6 +276,16 @@ module.exports = {
       // Gryphon's protect package — 07-guardrail requires its attack-detector
       // + obsidian test-stub directly.
       { src: path.join(ATHENA_ROOT, "vendor", "gryphon", "packages", "protect"), dest: "vendor/gryphon/packages/protect/" },
+      // ...and the one workspace package its import closure reaches. On the
+      // host it resolves through a symlink (node_modules/@polleoai/* →
+      // packages/*), which the bundler skips: matrix -3 (11-21) failed with
+      // "Cannot find module '@polleoai/gryphon-provider-runtime/utils'". Ship
+      // exactly what pro-rehearse.js's closure check resolves, no more (its
+      // node_modules must not ship). A new import fails that check first.
+      ...["package.json", "dist/utils.js"].map((f) => ({
+        src: path.join(GRYPHON_PROVIDER_RUNTIME, f),
+        dest: `vendor/gryphon/node_modules/@polleoai/gryphon-provider-runtime/${f}`,
+      })),
       // The argus harness itself (shipped runner + @shared/argus resolution).
       { src: ARGUS_REPO, dest: "argus/" },
     ],

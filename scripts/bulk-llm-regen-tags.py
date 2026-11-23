@@ -8,6 +8,11 @@ and rewrites the tags: line.
 Usage (from vault root):
   scripts/bulk-llm-regen-tags.py --dry-run --show-output
   scripts/bulk-llm-regen-tags.py
+
+Cost ceiling: --max-usd (default $10, #179), as in bulk-llm-regen-summaries.py.
+At the cap, or when a call's cost can't be read, the sweep stops (exit 3) and
+says how many pages are left; re-running picks them up, since a tagged page
+no longer has `tags: []`.
 """
 from __future__ import annotations
 
@@ -20,6 +25,9 @@ from pathlib import Path
 # Shared idle-timeout helper — see scripts/_athena_timeout.py for rationale.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _athena_timeout import (  # noqa: E402
+    DEFAULT_MAX_USD,
+    Budget,
+    BudgetExceeded,
     extract_text_from_stream_json,
     resolve_timeout_seconds,
     run_claude_with_idle_timeout,
@@ -29,7 +37,11 @@ VAULT = Path(__file__).resolve().parent.parent
 WIKI_FORMAT = VAULT / "wiki" / "format"
 MAX_BODY_CHARS = 8000
 
-MODEL = "claude-opus-4-7"
+# The current Opus, from Gryphon's registry (#182): no hardcoded id to go
+# stale when Gryphon retires one (claude-opus-4-7 was, in 2.13.0).
+from _athena_models import claude_model  # noqa: E402
+
+MODEL = claude_model("opus")
 
 # Canonical taxonomy by frequency (top tags from the existing vault).
 # The LLM is told to prefer these but may add adjacent terms when needed.
@@ -130,7 +142,9 @@ def update_tags_field(wiki_path: Path, tags: list[str], dry_run: bool = False) -
     return True
 
 
-def call_claude(title: str, source_type: str, body: str) -> list[str]:
+def call_claude(title: str, source_type: str, body: str, budget: Budget | None = None) -> list[str]:
+    if budget is not None:
+        budget.check()
     user_prompt = (
         f"PAGE TITLE: {title}\n"
         f"SOURCE TYPE: {source_type or 'unknown'}\n\n"
@@ -145,10 +159,14 @@ def call_claude(title: str, source_type: str, body: str) -> list[str]:
         "--include-partial-messages",
         "--model", MODEL,
         "--append-system-prompt", SYSTEM_PROMPT,
-        user_prompt,
     ]
+    if budget is not None:
+        cmd += ["--max-budget-usd", f"{budget.remaining():.6f}"]
+    cmd.append(user_prompt)  # the prompt stays the last argument
     idle_s = resolve_timeout_seconds(MODEL, vault=VAULT)
     rc, raw_out, raw_err = run_claude_with_idle_timeout(cmd, idle_s)
+    if budget is not None:
+        budget.charge(raw_out)  # before the rc check: a budget stop exits 1
     if rc != 0:
         raise RuntimeError(f"claude -p exit {rc}: {raw_err.strip()[:300] or '(empty)'}")
     return parse_tags(extract_text_from_stream_json(raw_out).strip())
@@ -160,7 +178,14 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--show-output", action="store_true")
     p.add_argument("--max-retries", type=int, default=2)
+    p.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD,
+                   help=f"Stop once the calls have cost this many USD (default: {DEFAULT_MAX_USD:g})")
     args = p.parse_args()
+    try:
+        budget = Budget(args.max_usd)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
     # Find candidates (pages with literal `tags: []`).
     candidates = []
@@ -177,6 +202,7 @@ def main() -> int:
 
     stats = {"updated": 0, "failed": 0}
     started = time.time()
+    stopped, left = "", 0
 
     for idx, wp in enumerate(candidates, start=1):
         if args.limit and stats["updated"] >= args.limit:
@@ -194,7 +220,10 @@ def main() -> int:
         last_err = ""
         for attempt in range(args.max_retries + 1):
             try:
-                tags = call_claude(title, source_type, body)
+                tags = call_claude(title, source_type, body, budget=budget)
+            except BudgetExceeded as exc:
+                stopped = str(exc)
+                break
             except (TimeoutError, RuntimeError) as exc:
                 last_err = str(exc)
                 print(f"  call failed (attempt {attempt+1}): {exc}", flush=True)
@@ -205,6 +234,9 @@ def main() -> int:
             print(f"  bad-count (attempt {attempt+1}): got {len(tags)} tags: {tags}", flush=True)
             tags = []
 
+        if stopped:
+            left = len(candidates) - idx + 1
+            break
         if not tags:
             stats["failed"] += 1
             print(f"  GIVE UP: {last_err or 'no valid tags after retries'}", flush=True)
@@ -218,8 +250,13 @@ def main() -> int:
     print(f"\n=== bulk-llm-regen-tags done in {elapsed:.0f}s ===")
     for k, v in stats.items():
         print(f"  {k}: {v}")
+    print(f"  spent: ${budget.spent:.4f} of ${budget.cap:.2f}")
     if args.dry_run:
         print("(dry-run — no files written)")
+    if stopped:
+        print(f"STOPPED at the cost cap: {stopped}. {left} page(s) left.")
+        print("Resume: re-run with a higher --max-usd; tagged pages no longer match tags: [].")
+        return 3
     return 0
 
 

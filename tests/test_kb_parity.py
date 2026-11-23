@@ -149,6 +149,11 @@ def _tree_snapshot(vault: str) -> dict[str, str]:
     # Processed N, TSV append) is already covered by the stdout assertion.
     for base in ("wiki", "raw", ".athena"):
         for f in glob.glob(os.path.join(vault, base, "**", "*"), recursive=True):
+            # .athena/audit*.jsonl (#180) is new behavior past the frozen Bash
+            # baseline: its ts and its prompt reasons differ by design. It has
+            # its own tests (tests/test_audit.py).
+            if os.path.basename(f).startswith("audit") and f.endswith(".jsonl"):
+                continue
             if os.path.isfile(f):
                 rel = os.path.relpath(f, vault)
                 try:
@@ -184,20 +189,55 @@ class KbParity(unittest.TestCase):
         finally:
             shutil.rmtree(vault, ignore_errors=True)
 
+    # Commands added to Python's help after bin/kb-legacy froze. Help has to
+    # grow with new commands, so byte-identity with the frozen Bash arm can't
+    # hold (#239). The check: same exit code, every legacy line present in
+    # order, and the only extra lines are these, named. A new command adds
+    # its help line here on purpose.
+    HELP_ADDED_SINCE_LEGACY = (
+        "kb bases ",
+        "kb canvas <topic> ",
+        "kb doctor ",
+        "kb audit tail [N] ",
+        "kb audit grep <text> ",
+        "kb backfill-figures ",
+        "kb merge-raw <raw> --into ",
+        "kb backfill-fulltext ",
+    )
+
+    def assert_help_superset(self, args: list[str]) -> None:
+        vault = _make_vault()
+        try:
+            legacy_code, legacy_out = _run("kb-legacy", args, vault)
+            py_code, py_out = _run("kb", args, vault)
+        finally:
+            shutil.rmtree(vault, ignore_errors=True)
+        self.assertEqual(legacy_code, py_code, f"exit code differs for {args!r}")
+        legacy_lines, py_lines = legacy_out.splitlines(), py_out.splitlines()
+        it = iter(py_lines)
+        missing = [ln for ln in legacy_lines if not any(ln == p for p in it)]
+        self.assertEqual(missing, [], f"legacy help lines missing or out of order for {args!r}")
+        extra = [ln for ln in py_lines if ln not in legacy_lines]
+        unnamed = [ln for ln in extra
+                   if not any(ln.strip().startswith(k) for k in self.HELP_ADDED_SINCE_LEGACY)]
+        self.assertEqual(unnamed, [], f"help lines not in legacy and not named as added for {args!r}")
+        self.assertEqual(len(extra), len(self.HELP_ADDED_SINCE_LEGACY),
+                         f"each added command appears once for {args!r}: {extra!r}")
+
     def test_help(self):
-        # `help` is now a native handler (cmd_help) -- its output must stay
-        # byte-identical to the Bash `help|--help|-h)` arm.
-        self.assert_parity(["help"])
+        # `help` is a native handler (cmd_help): the frozen Bash arm's lines,
+        # in order, plus the named commands added since.
+        self.assert_help_superset(["help"])
 
     def test_help_no_args(self):
         # Bare `kb` defaults cmd -> "help" in both entry points.
-        self.assert_parity([])
+        self.assert_help_superset([])
 
     def test_help_long_flag(self):
-        self.assert_parity(["--help"])
+        self.assert_help_superset(["--help"])
 
     def test_help_short_flag(self):
-        self.assert_parity(["-h"])
+        self.assert_help_superset(["-h"])
 
     def test_unknown_command(self):
         # Phase 3 retirement: the dispatcher no longer execs bin/kb-legacy for
@@ -943,6 +983,16 @@ class KbParity(unittest.TestCase):
             self._seed_multi_indexed(v2)
             _, legacy_out = _run("kb-legacy", ["topics"], v1)
             _, py_out = _run("kb", ["topics"], v2)
+            # Empty stdout means the command died before its first line; show
+            # why instead of an IndexError (agentd sandbox runs, #235).
+            for name, out, vault in (("kb-legacy", legacy_out, v1), ("kb", py_out, v2)):
+                if not out.strip():
+                    proc = subprocess.run(
+                        ["/bin/bash" if name == "kb-legacy" else sys.executable,
+                         os.path.join(vault, "bin", name), "topics"],
+                        cwd=vault, capture_output=True, text=True)
+                    self.fail(f"{name} topics printed nothing (exit {proc.returncode}); "
+                              f"stderr:\n{proc.stderr[-2000:]}")
             # Stable, shared prefix line (printed before the stochastic model).
             self.assertEqual(legacy_out.splitlines()[0], "Discovering topics...")
             self.assertEqual(legacy_out.splitlines()[0], py_out.splitlines()[0],

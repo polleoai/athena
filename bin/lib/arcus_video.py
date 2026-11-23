@@ -172,6 +172,19 @@ def ingest_youtube_url(
     the write, etc.). The bash caller is expected to fall back to its legacy
     inline yt-dlp path on this exception.
     """
+    # #243: arcus/yt-dlp fetch on their own; refuse a name that resolves to
+    # a private address before handing it over.
+    from url_safety import resolved_url_reason
+    reason = resolved_url_reason(url)
+    if reason:
+        raise ArcusVideoError(f"refusing to fetch {url}: {reason}")
+    # yt-dlp's traffic goes through arcus's guard proxy and Athena's policy.
+    from url_safety import install_arcus_guard
+    try:
+        install_arcus_guard()
+    except ImportError as e:
+        raise ArcusVideoError(str(e)) from e
+
     # Lazy-import arcus so a missing dep gives a clean error rather than
     # crashing at module load.
     try:
@@ -200,9 +213,10 @@ def ingest_youtube_url(
         with _silence_fds():
             exit_code = factory.run(url, out_dir=out_dir, force=False)
         if exit_code != EXIT_CODES["SUCCESS"]:
-            raise ArcusVideoError(
-                f"arcus extraction failed (exit {exit_code}) for {url}"
-            )
+            from arcus_errors import failure_reason, with_reason
+            raise ArcusVideoError(with_reason(
+                f"arcus extraction failed (exit {exit_code}) for {url}",
+                failure_reason(out_dir)))
 
         payload, arcus_body = _read_arcus_outputs(out_dir)
 

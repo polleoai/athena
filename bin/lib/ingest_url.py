@@ -36,6 +36,7 @@ _LIB_DIR = os.path.dirname(os.path.abspath(__file__))
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 from url_detect import detect_type  # noqa: E402
+from url_safety import safe_urlopen  # noqa: E402  (#243)
 from arcus_file import ingest_local_file, ArcusFileError  # noqa: E402
 
 
@@ -123,7 +124,7 @@ def _drive_filename(url, timeout=10):
             download_url, method='HEAD',
             headers={'User-Agent': 'Athena/1.0 (file ingest)'},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with safe_urlopen(req, timeout=timeout) as resp:
             disp = resp.headers.get('Content-Disposition') or ''
         m = re.search(r'filename\*?=(?:[^\'"]*\'\')?"?([^";]+)"?', disp)
         if m:
@@ -176,7 +177,7 @@ def _download_with_reason(url, dest_path, timeout=60, require_pdf=False):
         req = urllib.request.Request(
             effective, headers={'User-Agent': 'Athena/1.0 (file ingest)'},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp, \
+        with safe_urlopen(req, timeout=timeout) as resp, \
                 open(dest_path, 'wb') as f:
             if require_pdf:
                 first = resp.read(8)
@@ -302,6 +303,14 @@ def main():
 
     url = sys.argv[1]
     vault = _vault_root()
+
+    # Never fetch the local machine or a private network (#242, SSRF). Before
+    # detect_type(), which sends a HEAD request.
+    from url_safety import internal_url_reason
+    _internal = internal_url_reason(url)
+    if _internal:
+        print(f'ingest-file: refusing to fetch {url}: {_internal}', file=sys.stderr)
+        sys.exit(1)
 
     info = detect_type(url)
     st, ext = info['source_type'], info['ext']
